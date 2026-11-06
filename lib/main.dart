@@ -66,8 +66,44 @@ class _MainScreenState extends State<MainScreen> {
   final List<Widget> _pages = const [
     MapScreen(),
     CircleScreen(),
+    AuditLogScreen(),
     SecurityScreen(),
   ];
+
+  Widget _buildNavItem({
+    required int index,
+    required IconData icon,
+    required IconData activeIcon,
+    required String label,
+  }) {
+    final isSelected = _selectedIndex == index;
+    final color = isSelected ? const Color(0xFFE53935) : const Color(0xFF546E7A);
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() => _selectedIndex = index),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(isSelected ? activeIcon : icon, color: color, size: 24),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -94,17 +130,42 @@ class _MainScreenState extends State<MainScreen> {
           ),
           floatingActionButton: _buildSosFab(context, appState),
           floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _selectedIndex,
-            onTap: (value) => setState(() => _selectedIndex = value),
-            type: BottomNavigationBarType.fixed,
-            selectedItemColor: const Color(0xFFE53935),
-            unselectedItemColor: const Color(0xFF546E7A),
-            items: const [
-              BottomNavigationBarItem(icon: Icon(Icons.map_outlined), activeIcon: Icon(Icons.map), label: 'Bản đồ'),
-              BottomNavigationBarItem(icon: Icon(Icons.groups_outlined), activeIcon: Icon(Icons.groups), label: 'Vòng tròn'),
-              BottomNavigationBarItem(icon: Icon(Icons.shield_outlined), activeIcon: Icon(Icons.shield), label: 'Bảo mật'),
-            ],
+          bottomNavigationBar: BottomAppBar(
+            shape: const CircularNotchedRectangle(),
+            notchMargin: 8,
+            color: Colors.white,
+            elevation: 8,
+            padding: EdgeInsets.zero,
+            height: 64,
+            child: Row(
+              children: [
+                _buildNavItem(
+                  index: 0,
+                  icon: Icons.map_outlined,
+                  activeIcon: Icons.map,
+                  label: 'Bản đồ',
+                ),
+                _buildNavItem(
+                  index: 1,
+                  icon: Icons.groups_outlined,
+                  activeIcon: Icons.groups,
+                  label: 'Vòng tròn',
+                ),
+                const SizedBox(width: 76),
+                _buildNavItem(
+                  index: 2,
+                  icon: Icons.history_rounded,
+                  activeIcon: Icons.history,
+                  label: 'Nhật ký',
+                ),
+                _buildNavItem(
+                  index: 3,
+                  icon: Icons.shield_outlined,
+                  activeIcon: Icons.shield,
+                  label: 'Bảo mật',
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -1083,6 +1144,66 @@ class _CircleMember {
     required this.avatarColor,
     required this.isSharing,
   });
+}
+
+class AuditLogScreen extends StatelessWidget {
+  const AuditLogScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = AppScope.read(context);
+
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) {
+        final auditLogs = <String>[
+          ...appState.auditLogs,
+          '08:30 - Bố đã xem vị trí của bạn',
+          '09:15 - Mẹ đã xem vị trí của bạn',
+          '11:40 - Con đã xem vị trí của bạn',
+        ];
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Nhật ký kiểm toán E2EE'),
+            backgroundColor: Colors.white,
+            elevation: 0,
+          ),
+          body: ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: auditLogs.length,
+            separatorBuilder: (context, index) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final log = auditLogs[index];
+              final isSos = log.contains('SOS');
+              return ListTile(
+                leading: CircleAvatar(
+                  backgroundColor:
+                      isSos ? const Color(0xFFFFEBEE) : const Color(0xFFE3F2FD),
+                  foregroundColor:
+                      isSos ? const Color(0xFFE53935) : const Color(0xFF1E88E5),
+                  child: Icon(
+                    isSos ? Icons.warning_amber_rounded : Icons.history_rounded,
+                  ),
+                ),
+                title: Text(
+                  log,
+                  style: TextStyle(
+                    fontWeight: isSos ? FontWeight.bold : FontWeight.normal,
+                    color: isSos ? const Color(0xFFB71C1C) : const Color(0xFF18191F),
+                  ),
+                ),
+                subtitle: const Text(
+                  'Xác thực chữ ký & mã hóa E2EE',
+                  style: TextStyle(fontSize: 11.5),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
 }
 
 class SecurityScreen extends StatefulWidget {
