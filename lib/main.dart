@@ -4,29 +4,50 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:sos_safe_family/core/app_state.dart';
+import 'package:sos_safe_family/data/models/geofence.dart';
+import 'package:sos_safe_family/data/models/sos_event.dart';
+import 'package:sos_safe_family/data/services/geofence_service.dart';
 import 'package:sos_safe_family/presentation/screens/family_chat_screen.dart';
+import 'package:sos_safe_family/presentation/screens/sos_countdown_screen.dart';
 
 void main() {
   runApp(const SOSFamilyApp());
 }
 
-class SOSFamilyApp extends StatelessWidget {
+class SOSFamilyApp extends StatefulWidget {
   const SOSFamilyApp({super.key});
 
   @override
+  State<SOSFamilyApp> createState() => _SOSFamilyAppState();
+}
+
+class _SOSFamilyAppState extends State<SOSFamilyApp> {
+  final AppState _state = AppState();
+
+  @override
+  void dispose() {
+    _state.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'SOS An Toàn Gia Đình',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFE53935),
-          brightness: Brightness.light,
+    return AppScope(
+      state: _state,
+      child: MaterialApp(
+        title: 'SOS An Toàn Gia Đình',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          useMaterial3: true,
+          scaffoldBackgroundColor: const Color(0xFFF5F7FA),
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xFFE53935),
+            brightness: Brightness.light,
+          ),
         ),
+        home: const MainScreen(),
       ),
-      home: const MainScreen(),
     );
   }
 }
@@ -48,82 +69,195 @@ class _MainScreenState extends State<MainScreen> {
     SecurityScreen(),
   ];
 
-  void _showSosDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        backgroundColor: const Color(0xFF18191F),
-        title: Row(
-          children: const [
-            Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
-            SizedBox(width: 8),
-            Text('Cảnh báo SOS', style: TextStyle(color: Colors.white)),
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppScope.read(context),
+      builder: (context, _) {
+        final appState = AppScope.read(context);
+        return Scaffold(
+          body: Stack(
+            children: [
+              IndexedStack(
+                index: _selectedIndex,
+                children: _pages,
+              ),
+              // Banner trạng thái khẩn cấp (nằm trên tất cả màn hình).
+              if (appState.isSosActive)
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: _SosEmergencyBanner(appState: appState),
+                ),
+            ],
+          ),
+          floatingActionButton: _buildSosFab(context, appState),
+          floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+          bottomNavigationBar: BottomNavigationBar(
+            currentIndex: _selectedIndex,
+            onTap: (value) => setState(() => _selectedIndex = value),
+            type: BottomNavigationBarType.fixed,
+            selectedItemColor: const Color(0xFFE53935),
+            unselectedItemColor: const Color(0xFF546E7A),
+            items: const [
+              BottomNavigationBarItem(icon: Icon(Icons.map_outlined), activeIcon: Icon(Icons.map), label: 'Bản đồ'),
+              BottomNavigationBarItem(icon: Icon(Icons.groups_outlined), activeIcon: Icon(Icons.groups), label: 'Vòng tròn'),
+              BottomNavigationBarItem(icon: Icon(Icons.shield_outlined), activeIcon: Icon(Icons.shield), label: 'Bảo mật'),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Nút SOS: giữ 2 giây → đếm ngược 3 giây → kích hoạt khẩn cấp.
+  Widget _buildSosFab(BuildContext context, AppState appState) {
+    if (appState.isSosActive) {
+      return Container(
+        width: 74,
+        height: 74,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: const Color(0xFFB71C1C),
+          boxShadow: [
+            BoxShadow(color: const Color(0x66B71C1C), blurRadius: 18, offset: const Offset(0, 8)),
           ],
         ),
-        content: const Text(
-          'Mô phỏng kích hoạt SOS. Chế độ khẩn cấp đang được gửi đến các thành viên trong gia đình.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Đã hiểu', style: TextStyle(color: Colors.redAccent)),
+        child: const Icon(Icons.sos, color: Colors.white, size: 32),
+      );
+    }
+
+    return GestureDetector(
+      onLongPressStart: (_) {
+        _sosTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted) {
+            _showSosCountdown(appState);
+          }
+        });
+      },
+      onLongPressEnd: (_) {
+        _sosTimer?.cancel();
+        _sosTimer = null;
+      },
+      onLongPressCancel: () {
+        _sosTimer?.cancel();
+        _sosTimer = null;
+      },
+      child: Container(
+        width: 74,
+        height: 74,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            colors: [Color(0xFFFF4D4F), Color(0xFFB71C1C)],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
           ),
-        ],
+          boxShadow: [
+            BoxShadow(color: Color(0x66E53935), blurRadius: 20, offset: Offset(0, 10)),
+          ],
+        ),
+        child: const Icon(Icons.sos, color: Colors.white, size: 32),
       ),
     );
   }
 
+  /// Mở màn hình đếm ngược SOS 3 giây.
+  ///
+  /// Nguyên tắc "an toàn trước tiên": cảnh báo **luôn** được kích hoạt, kể cả
+  /// khi chưa có toạ độ GPS — dùng toạ độ cuối cùng nếu có, nếu không thì dùng
+  /// tâm bản đồ mặc định và đánh dấu `isMocked = true` để gia đình biết đây
+  /// không phải vị trí GPS thực.
+  void _showSosCountdown(AppState appState) async {
+    final Position? position = appState.lastPosition;
+    final LatLng fallback =
+        appState.currentLocation ?? const LatLng(21.0285, 105.8542);
+    final double lat = position?.latitude ?? fallback.latitude;
+    final double lng = position?.longitude ?? fallback.longitude;
+    final bool mocked = position == null ? true : appState.isMockGps;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => SosCountdownScreen(
+        onCancel: () => Navigator.of(dialogContext).pop(),
+        onConfirm: () async {
+          Navigator.of(dialogContext).pop();
+          await appState.activateSos(
+            lat: lat,
+            lng: lng,
+            isMocked: mocked,
+            senderName: 'Chính chủ',
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Banner đỏ "TRẠNG THÁI KHẨN CẤP ĐANG BẬT" nổi trên đỉnh ứng dụng.
+class _SosEmergencyBanner extends StatelessWidget {
+  const _SosEmergencyBanner({required this.appState});
+
+  final AppState appState;
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(index: _selectedIndex, children: _pages),
-      floatingActionButton: GestureDetector(
-        onLongPressStart: (_) {
-          _sosTimer = Timer(const Duration(seconds: 2), () {
-            if (mounted) {
-              _showSosDialog();
-            }
-          });
-        },
-        onLongPressEnd: (_) {
-          _sosTimer?.cancel();
-          _sosTimer = null;
-        },
-        onLongPressCancel: () {
-          _sosTimer?.cancel();
-          _sosTimer = null;
-        },
-        child: Container(
-          width: 74,
-          height: 74,
-          decoration: const BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: LinearGradient(
-              colors: [Color(0xFFFF4D4F), Color(0xFFB71C1C)],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
-            boxShadow: [
-              BoxShadow(color: Color(0x66E53935), blurRadius: 20, offset: Offset(0, 10)),
-            ],
-          ),
-          child: const Icon(Icons.sos, color: Colors.white, size: 32),
-        ),
+    final SosEvent? active = appState.activeSos;
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFB71C1C),
+        boxShadow: const [
+          BoxShadow(color: Color(0x55B71C1C), blurRadius: 14, offset: Offset(0, 4)),
+        ],
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        onTap: (value) => setState(() => _selectedIndex = value),
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: const Color(0xFFE53935),
-        unselectedItemColor: const Color(0xFF546E7A),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.map_outlined), activeIcon: Icon(Icons.map), label: 'Bản đồ'),
-          BottomNavigationBarItem(icon: Icon(Icons.groups_outlined), activeIcon: Icon(Icons.groups), label: 'Vòng tròn'),
-          BottomNavigationBarItem(icon: Icon(Icons.shield_outlined), activeIcon: Icon(Icons.shield), label: 'Bảo mật'),
+      padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'TRẠNG THÁI KHẨN CẤP ĐANG BẬT',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                if (active != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Đã mã hóa E2EE • Gửi tới gia đình lúc ${active.timestamp.hour.toString().padLeft(2, '0')}:${active.timestamp.minute.toString().padLeft(2, '0')}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            child: FilledButton.icon(
+              onPressed: () => appState.resolveSos(),
+              icon: const Icon(Icons.check_rounded, size: 16),
+              label: const Text(
+                'TÔI ĐÃ AN TOÀN',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.6),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: const Color(0xFFB71C1C),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -220,8 +354,10 @@ class _MapScreenState extends State<MapScreen> {
       }
 
       final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-        timeLimit: const Duration(seconds: 10),
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 10),
+        ),
       );
 
       final userLoc = LatLng(position.latitude, position.longitude);
@@ -231,6 +367,8 @@ class _MapScreenState extends State<MapScreen> {
           _isMockGps = position.isMocked;
           _isLoadingLocation = false;
         });
+        // Đẩy vị trí vào AppState để đánh giá vùng an toàn + trạng thái SOS.
+        AppScope.read(context).updatePosition(position);
         _mapController.move(userLoc, 16.0);
       }
     } catch (e) {
@@ -375,8 +513,82 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  /// BottomSheet liệt kê các vùng an toàn kèm trạng thái vào/ra vùng.
+  void _showGeofenceListSheet(BuildContext context, AppState appState) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) => AnimatedBuilder(
+        animation: appState,
+        builder: (context, _) {
+          final List<Geofence> fences = appState.geofences;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE0E0E0),
+                        borderRadius: BorderRadius.circular(100),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Vùng an toàn',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Khoảng cách tính bằng công thức Haversine (bề mặt cầu kinh độ)',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  if (fences.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Text('Chưa có vùng an toàn nào.'),
+                    )
+                  else
+                    ...fences.map(
+                      (fence) => _GeofenceTile(
+                        fence: fence,
+                        distanceMeters: _myLocation == null
+                            ? null
+                            : GeofenceService.distanceToFence(
+                                _myLocation!,
+                                fence,
+                              ),
+                        onToggle: () => appState.toggleGeofence(fence.id),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final AppState appState = AppScope.read(context);
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) => _buildScaffold(context, appState),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context, AppState appState) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Bản đồ gia đình'),
@@ -409,6 +621,28 @@ class _MapScreenState extends State<MapScreen> {
               TileLayer(
                 urlTemplate: 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
                 userAgentPackageName: 'vn.atbm.sos.sos_safe_family',
+              ),
+              // Vùng an toàn (geofence) — vòng tròn bán kính tính bằng mét.
+              // Viền xanh khi đang ở trong vùng, viền cam khi ở ngoài; nền mờ
+              // bán trong suốt để vẫn thấy được bản đồ bên dưới.
+              CircleLayer(
+                circles: [
+                  for (final Geofence fence in appState.geofences)
+                    if (fence.isEnabled)
+                      CircleMarker(
+                        point: fence.center,
+                        radius: fence.radiusMeters,
+                        useRadiusInMeter: true,
+                        color: (fence.isInside
+                                ? const Color(0xFF43A047)
+                                : const Color(0xFFFF9800))
+                            .withValues(alpha: 0.2),
+                        borderColor: fence.isInside
+                            ? const Color(0xFF2E7D32)
+                            : const Color(0xFFEF6C00),
+                        borderStrokeWidth: 2.5,
+                      ),
+                ],
               ),
               MarkerLayer(
                 markers: [
@@ -459,7 +693,7 @@ class _MapScreenState extends State<MapScreen> {
                               height: 56,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: const Color(0xFF007AFF).withOpacity(0.2),
+                                color: const Color(0xFF007AFF).withValues(alpha: 0.2),
                               ),
                             ),
                             Container(
@@ -494,7 +728,7 @@ class _MapScreenState extends State<MapScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.95),
+                  color: Colors.white.withValues(alpha: 0.95),
                   borderRadius: BorderRadius.circular(30),
                   boxShadow: const [
                     BoxShadow(color: Colors.black12, blurRadius: 8, offset: Offset(0, 3)),
@@ -525,6 +759,20 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+          // Nút mở danh sách vùng an toàn
+          Positioned(
+            bottom: 30,
+            right: 76,
+            child: FloatingActionButton.small(
+              heroTag: 'geofence_list_btn',
+              backgroundColor: Colors.white,
+              foregroundColor: const Color(0xFFEF6C00),
+              elevation: 4,
+              tooltip: 'Vùng an toàn',
+              onPressed: () => _showGeofenceListSheet(context, appState),
+              child: const Icon(Icons.shield_outlined),
+            ),
+          ),
           // Floating Button to center to current location
           Positioned(
             bottom: 30,
@@ -549,6 +797,76 @@ class _MapScreenState extends State<MapScreen> {
                     )
                   : const Icon(Icons.my_location),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Một dòng trong danh sách vùng an toàn.
+class _GeofenceTile extends StatelessWidget {
+  const _GeofenceTile({
+    required this.fence,
+    required this.distanceMeters,
+    required this.onToggle,
+  });
+
+  final Geofence fence;
+  final double? distanceMeters;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool inside = fence.isInside;
+    final Color accent = fence.isEnabled
+        ? (inside ? const Color(0xFF43A047) : const Color(0xFFEF6C00))
+        : Colors.grey;
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 22,
+        backgroundColor: accent.withValues(alpha: 0.15),
+        foregroundColor: accent,
+        child: Icon(inside ? Icons.home_rounded : Icons.shield_outlined, size: 22),
+      ),
+      title: Text(
+        fence.name,
+        style: const TextStyle(fontWeight: FontWeight.w700),
+      ),
+      subtitle: Text(
+        'Bán kính ${fence.radiusMeters.round()}m'
+        '${distanceMeters == null ? '' : ' • Cách bạn ${distanceMeters!.round()}m'}',
+        style: const TextStyle(fontSize: 12),
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                !fence.isEnabled
+                    ? 'TẮT'
+                    : (inside ? 'ĐANG TRONG VÙNG' : 'Ở NGOÀI VÙNG'),
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  color: accent,
+                ),
+              ),
+              SizedBox(
+                height: 40,
+                child: Switch.adaptive(
+                  value: fence.isEnabled,
+                  onChanged: (_) => onToggle(),
+                  activeThumbColor: const Color(0xFFE53935),
+                  activeTrackColor: const Color(0xFFE53935),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -780,13 +1098,19 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final auditLogs = [
-      '08:30 - Bố đã xem vị trí của bạn',
-      '09:15 - Mẹ đã xem vị trí của bạn',
-      '11:40 - Con đã xem vị trí của bạn',
-    ];
+    final AppState appState = AppScope.read(context);
 
-    return Scaffold(
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) {
+        final auditLogs = <String>[
+          ...appState.auditLogs,
+          '08:30 - Bố đã xem vị trí của bạn',
+          '09:15 - Mẹ đã xem vị trí của bạn',
+          '11:40 - Con đã xem vị trí của bạn',
+        ];
+
+        return Scaffold(
       appBar: AppBar(
         title: const Text('Bảo mật & cài đặt'),
         backgroundColor: Colors.white,
@@ -817,7 +1141,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
           const Divider(),
           ExpansionTile(
             leading: const Icon(Icons.history_rounded, color: Color(0xFFE53935)),
-            title: const Text('Nhật ký ai đã xem vị trí của tôi', style: TextStyle(fontWeight: FontWeight.w600)),
+            title: const Text('Nhật ký kiểm toán & xem vị trí', style: TextStyle(fontWeight: FontWeight.w600)),
             childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             children: auditLogs
                 .map(
@@ -837,6 +1161,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
           ),
         ],
       ),
+        );
+      },
     );
   }
 }
