@@ -38,9 +38,14 @@ void main() {
     await tester.pumpWidget(const SOSFamilyApp());
     await tester.pump();
 
-    // Thanh điều hướng dưới với 3 mục: Bản đồ / Vòng tròn / Bảo mật.
+    // Thanh điều hướng dưới với các mục: Bản đồ / Vòng tròn / Cá nhân.
     expect(find.text('Bản đồ'), findsOneWidget);
     expect(find.text('Vòng tròn'), findsOneWidget);
+    expect(find.text('Cá nhân'), findsOneWidget);
+
+    // Chạm vào mục Cá nhân để kiểm tra có mục Bảo mật
+    await tester.tap(find.text('Cá nhân'));
+    await tester.pump();
     expect(find.text('Bảo mật'), findsOneWidget);
 
     // Nút SOS nổi bật.
