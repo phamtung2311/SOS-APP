@@ -81,8 +81,8 @@ class CryptoService {
 
     return _hkdf.deriveKey(
       secretKey: sharedSecret,
-      nonce: const <int>[],
-      info: const <int>[],
+      nonce: Uint8List(32), // Chuẩn RFC 5869: salt mặc định 32 byte 0 cho SHA-256 (tránh Empty key trên Android JCE)
+      info: utf8.encode('sos_safe_family_aes_key'),
     );
   }
 
