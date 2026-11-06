@@ -4,9 +4,11 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:sos_safe_family/data/models/geofence.dart';
 import 'package:sos_safe_family/data/models/sos_event.dart';
+import 'package:sos_safe_family/data/services/biometric_service.dart';
 import 'package:sos_safe_family/data/services/crypto_service.dart';
 import 'package:sos_safe_family/data/services/geofence_service.dart';
 import 'package:sos_safe_family/data/services/sos_service.dart';
+import 'package:sos_safe_family/data/services/tamper_detector.dart';
 import 'package:uuid/uuid.dart';
 
 /// Trạng thái ứng dụng dùng chung cho các màn hình.
@@ -15,13 +17,20 @@ import 'package:uuid/uuid.dart';
 /// động và nhật ký kiểm toán — nhờ đó nút SOS ở `MainScreen` và màn hình
 /// `SecurityScreen` không phải truyền dữ liệu qua constructor.
 class AppState extends ChangeNotifier {
-  AppState({CryptoService? cryptoService})
-      : _crypto = cryptoService ?? CryptoService() {
+  AppState({
+    CryptoService? cryptoService,
+    BiometricService? biometricService,
+    TamperDetector? tamperDetector,
+  })  : _crypto = cryptoService ?? CryptoService(),
+        _biometric = biometricService ?? BiometricService(),
+        _tamper = tamperDetector ?? TamperDetector() {
     _sosService = SosService(cryptoService: _crypto);
     _geofences = GeofenceService.seedGeofences();
   }
 
   final CryptoService _crypto;
+  final BiometricService _biometric;
+  final TamperDetector _tamper;
   late final SosService _sosService;
   final Uuid _uuid = const Uuid();
 
@@ -42,6 +51,19 @@ class AppState extends ChangeNotifier {
   // ---- Nhật ký kiểm toán ----
   final List<String> _auditLogs = <String>[];
 
+  // ---- Bảo mật ----
+
+  /// Bật khoá sinh trắc học cho các vùng dữ liệu nhạy cảm.
+  ///
+  /// Bản đồ & SOS luôn miễn nhiễm theo nguyên tắc Emergency Bypass.
+  bool _sensitiveDataLockEnabled = true;
+
+  /// Cờ chống chụp màn hình (`FLAG_SECURE` native).
+  bool _flagSecureEnabled = true;
+
+  /// Báo cáo toàn vẹn thiết bị (root / GPS giả / FLAG_SECURE).
+  TamperReport? _tamperReport;
+
   // ---------------------------------------------------------------------
   // Getters
   // ---------------------------------------------------------------------
@@ -55,6 +77,20 @@ class AppState extends ChangeNotifier {
   bool get isSosActive => _activeSos?.isActive ?? false;
   EncryptedSosPayload? get lastEncryptedSos => _lastEncryptedSos;
   List<String> get auditLogs => List.unmodifiable(_auditLogs);
+
+  // ---- Bảo mật getters ----
+
+  /// Khoá sinh trắc học cho dữ liệu nhạy cảm đang bật hay không.
+  bool get sensitiveDataLockEnabled => _sensitiveDataLockEnabled;
+
+  /// Cờ chống chụp màn hình đang bật hay không.
+  bool get flagSecureEnabled => _flagSecureEnabled;
+
+  /// Dịch vụ sinh trắc học (được dùng bởi `BiometricGate`).
+  BiometricService get biometricService => _biometric;
+
+  /// Báo cáo toàn vẹn thiết bị hiện tại (có thể null nếu chưa kiểm tra).
+  TamperReport? get tamperReport => _tamperReport;
 
   /// Mức pin hiện tại (%).
   ///
@@ -194,6 +230,35 @@ class AppState extends ChangeNotifier {
       _auditLogs.removeLast();
     }
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------
+  // Bảo mật & Toàn vẹn thiết bị
+  // ---------------------------------------------------------------------
+
+  /// Bật/tắt khoá sinh trắc học cho vùng dữ liệu nhạy cảm.
+  void setSensitiveDataLock(bool enabled) {
+    _sensitiveDataLockEnabled = enabled;
+    notifyListeners();
+  }
+
+  /// Bật/tắt cờ chống chụp màn hình (gọi native FLAG_SECURE).
+  Future<void> setFlagSecure(bool enabled) async {
+    _flagSecureEnabled = enabled;
+    await _tamper.setFlagSecure(enabled);
+    await refreshTamperReport();
+    notifyListeners();
+  }
+
+  /// Làm mới báo cáo toàn vẹn thiết bị (root, GPS giả lập, FLAG_SECURE).
+  Future<TamperReport> refreshTamperReport() async {
+    final report = await _tamper.inspect(
+      position: _lastPosition,
+      screenCaptureProtected: _flagSecureEnabled,
+    );
+    _tamperReport = report;
+    notifyListeners();
+    return report;
   }
 }
 

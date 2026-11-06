@@ -47,3 +47,11 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Bắt buộc cho BiometricPrompt (plugin local_auth): cung cấp các theme
+    // AppCompat mà MainActivity kế thừa qua Theme.AppCompat.DayNight.
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.fragment:fragment:1.8.9")
+}

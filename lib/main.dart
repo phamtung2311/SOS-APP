@@ -7,7 +7,10 @@ import 'package:latlong2/latlong.dart';
 import 'package:sos_safe_family/core/app_state.dart';
 import 'package:sos_safe_family/data/models/geofence.dart';
 import 'package:sos_safe_family/data/models/sos_event.dart';
+import 'package:sos_safe_family/data/services/biometric_service.dart';
 import 'package:sos_safe_family/data/services/geofence_service.dart';
+import 'package:sos_safe_family/data/services/tamper_detector.dart';
+import 'package:sos_safe_family/data/services/trip_share_service.dart';
 import 'package:sos_safe_family/presentation/screens/family_chat_screen.dart';
 import 'package:sos_safe_family/presentation/screens/sos_countdown_screen.dart';
 
@@ -22,11 +25,31 @@ class SOSFamilyApp extends StatefulWidget {
   State<SOSFamilyApp> createState() => _SOSFamilyAppState();
 }
 
-class _SOSFamilyAppState extends State<SOSFamilyApp> {
+class _SOSFamilyAppState extends State<SOSFamilyApp> with WidgetsBindingObserver {
   final AppState _state = AppState();
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Kích hoạt cờ chống chụp màn hình nếu được cấu hình mặc định
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_state.flagSecureEnabled) {
+        _state.setFlagSecure(true);
+      }
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      _state.biometricService.onBackgrounded();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _state.dispose();
     super.dispose();
   }
@@ -75,12 +98,13 @@ class _MainScreenState extends State<MainScreen> {
     required IconData icon,
     required IconData activeIcon,
     required String label,
+    required AppState appState,
   }) {
     final isSelected = _selectedIndex == index;
     final color = isSelected ? const Color(0xFFE53935) : const Color(0xFF546E7A);
     return Expanded(
       child: InkWell(
-        onTap: () => setState(() => _selectedIndex = index),
+        onTap: () => _handleNavTap(index, appState),
         borderRadius: BorderRadius.circular(12),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -103,6 +127,43 @@ class _MainScreenState extends State<MainScreen> {
         ),
       ),
     );
+  }
+
+  /// Điều hướng tab theo nguyên tắc Emergency Bypass:
+  /// - Tab 0 (Bản đồ): Zero Barrier — mở ngay lập tức, không bao giờ hỏi mật khẩu/vân tay.
+  /// - Tab 1, 2, 3: Vùng nhạy cảm — xác thực sinh trắc học nếu tính năng đang bật và chưa mở trong phiên.
+  Future<void> _handleNavTap(int index, AppState appState) async {
+    if (index == _selectedIndex) return;
+
+    if (index == 0) {
+      setState(() => _selectedIndex = 0);
+      return;
+    }
+
+    if (appState.sensitiveDataLockEnabled &&
+        !appState.biometricService.isUnlockedThisSession) {
+      final BiometricResult result =
+          await appState.biometricService.authenticateSensitiveAccess(
+        localizedReason:
+            'Xác thực vân tay/mật khẩu để mở vùng riêng tư gia đình',
+      );
+      if (result != BiometricResult.success &&
+          result != BiometricResult.unavailable) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Yêu cầu xác thực để truy cập dữ liệu gia đình'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (mounted) {
+      setState(() => _selectedIndex = index);
+    }
   }
 
   @override
@@ -144,12 +205,14 @@ class _MainScreenState extends State<MainScreen> {
                   icon: Icons.map_outlined,
                   activeIcon: Icons.map,
                   label: 'Bản đồ',
+                  appState: appState,
                 ),
                 _buildNavItem(
                   index: 1,
                   icon: Icons.groups_outlined,
                   activeIcon: Icons.groups,
                   label: 'Vòng tròn',
+                  appState: appState,
                 ),
                 const SizedBox(width: 76),
                 _buildNavItem(
@@ -157,12 +220,14 @@ class _MainScreenState extends State<MainScreen> {
                   icon: Icons.history_rounded,
                   activeIcon: Icons.history,
                   label: 'Nhật ký',
+                  appState: appState,
                 ),
                 _buildNavItem(
                   index: 3,
                   icon: Icons.person_outline_rounded,
                   activeIcon: Icons.person_rounded,
                   label: 'Cá nhân',
+                  appState: appState,
                 ),
               ],
             ),
@@ -490,14 +555,38 @@ class _MapScreenState extends State<MapScreen> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => FamilyChatScreen(memberName: member.name),
-                    ),
-                  );
+                onPressed: () async {
+                  final appState = AppScope.read(context);
+                  if (appState.sensitiveDataLockEnabled &&
+                      !appState.biometricService.isUnlockedThisSession) {
+                    final result =
+                        await appState.biometricService.authenticateSensitiveAccess(
+                      localizedReason:
+                          'Xác thực vân tay/mật khẩu để mở tin nhắn bảo mật E2EE',
+                    );
+                    if (result != BiometricResult.success &&
+                        result != BiometricResult.unavailable) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                                'Yêu cầu xác thực để truy cập tin nhắn riêng tư'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                      return;
+                    }
+                  }
+                  if (context.mounted) {
+                    Navigator.of(context).pop();
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => FamilyChatScreen(memberName: member.name),
+                      ),
+                    );
+                  }
                 },
                 icon: const Icon(Icons.chat_bubble_outline, size: 18),
                 label: const Text('Nhắn tin bảo mật E2EE'),
@@ -637,6 +726,14 @@ class _MapScreenState extends State<MapScreen> {
           );
         },
       ),
+    );
+  }
+
+  /// Hiển thị hộp thoại chia sẻ hành trình bằng mã số 6 chữ số có thời hạn (60 phút).
+  void _showTripShareDialog(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => const _TripShareDialog(),
     );
   }
 
@@ -832,6 +929,20 @@ class _MapScreenState extends State<MapScreen> {
               tooltip: 'Vùng an toàn',
               onPressed: () => _showGeofenceListSheet(context, appState),
               child: const Icon(Icons.shield_outlined),
+            ),
+          ),
+          // Nút chia sẻ hành trình bằng mã 6 chữ số (SHA-256 / 60 phút)
+          Positioned(
+            bottom: 30,
+            right: 136,
+            child: FloatingActionButton.small(
+              heroTag: 'share_trip_btn',
+              backgroundColor: Colors.white,
+              foregroundColor: const Color(0xFF2E7D32),
+              elevation: 4,
+              tooltip: 'Chia sẻ hành trình',
+              onPressed: () => _showTripShareDialog(context),
+              child: const Icon(Icons.alt_route_rounded),
             ),
           ),
           // Floating Button to center to current location
@@ -1476,8 +1587,13 @@ class SecurityScreen extends StatefulWidget {
 }
 
 class _SecurityScreenState extends State<SecurityScreen> {
-  bool _fingerprintLock = true;
-  bool _flagSecure = true;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      AppScope.read(context).refreshTamperReport();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1492,60 +1608,346 @@ class _SecurityScreenState extends State<SecurityScreen> {
           '09:15 - Mẹ đã xem vị trí của bạn',
           '11:40 - Con đã xem vị trí của bạn',
         ];
+        final TamperReport? tamper = appState.tamperReport;
 
         return Scaffold(
-      appBar: AppBar(
-        title: const Text('Bảo mật & cài đặt'),
-        backgroundColor: Colors.white,
-        elevation: 0,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Khóa vân tay', style: TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: const Text('Yêu cầu xác thực trước khi mở ứng dụng'),
-            value: _fingerprintLock,
-            activeThumbColor: const Color(0xFFE53935),
-            activeTrackColor: const Color(0xFFF8BBD0),
-            onChanged: (value) => setState(() => _fingerprintLock = value),
+          appBar: AppBar(
+            title: const Text('Bảo mật & cài đặt'),
+            backgroundColor: Colors.white,
+            elevation: 0,
           ),
-          const Divider(),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Chống chụp màn hình', style: TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: const Text('Bật FLAG_SECURE để bảo vệ nội dung màn hình'),
-            value: _flagSecure,
-            activeThumbColor: const Color(0xFFE53935),
-            activeTrackColor: const Color(0xFFF8BBD0),
-            onChanged: (value) => setState(() => _flagSecure = value),
-          ),
-          const Divider(),
-          ExpansionTile(
-            leading: const Icon(Icons.history_rounded, color: Color(0xFFE53935)),
-            title: const Text('Nhật ký kiểm toán & xem vị trí', style: TextStyle(fontWeight: FontWeight.w600)),
-            childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            children: auditLogs
-                .map(
-                  (log) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.access_time_filled, size: 16, color: Color(0xFF607D8B)),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(log)),
-                      ],
-                    ),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text(
+                  'Khóa sinh trắc học vùng nhạy cảm',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text(
+                  'Bảo vệ Vòng tròn, Nhật ký & Tin nhắn (Bản đồ & SOS luôn mở khẩn cấp)',
+                ),
+                value: appState.sensitiveDataLockEnabled,
+                activeThumbColor: const Color(0xFFE53935),
+                activeTrackColor: const Color(0xFFF8BBD0),
+                onChanged: (value) => appState.setSensitiveDataLock(value),
+              ),
+              const Divider(),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text(
+                  'Chống chụp màn hình',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text(
+                  'Bật FLAG_SECURE native để chặn chụp & quay màn hình',
+                ),
+                value: appState.flagSecureEnabled,
+                activeThumbColor: const Color(0xFFE53935),
+                activeTrackColor: const Color(0xFFF8BBD0),
+                onChanged: (value) => appState.setFlagSecure(value),
+              ),
+              const Divider(),
+              const SizedBox(height: 8),
+              // Thẻ kiểm tra toàn vẹn thiết bị (Root & GPS giả lập)
+              Card(
+                elevation: 0,
+                color: tamper != null && !tamper.isTrusted
+                    ? const Color(0xFFFFF3E0)
+                    : const Color(0xFFE8F5E9),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(
+                    color: tamper != null && !tamper.isTrusted
+                        ? const Color(0xFFFFB74D)
+                        : const Color(0xFFA5D6A7),
                   ),
-                )
-                .toList(),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            tamper != null && !tamper.isTrusted
+                                ? Icons.warning_rounded
+                                : Icons.verified_user_rounded,
+                            color: tamper != null && !tamper.isTrusted
+                                ? const Color(0xFFE65100)
+                                : const Color(0xFF2E7D32),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            tamper != null && !tamper.isTrusted
+                                ? 'Cảnh báo toàn vẹn thiết bị'
+                                : 'Toàn vẹn thiết bị an toàn',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: tamper != null && !tamper.isTrusted
+                                  ? const Color(0xFFE65100)
+                                  : const Color(0xFF2E7D32),
+                            ),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.refresh, size: 20),
+                            tooltip: 'Kiểm tra lại',
+                            onPressed: () => appState.refreshTamperReport(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      _buildIntegrityRow(
+                        label: 'Trạng thái Root:',
+                        value: tamper?.rootLabel ?? 'Đang kiểm tra...',
+                        isSafe: !(tamper?.isRooted ?? false),
+                      ),
+                      const SizedBox(height: 4),
+                      _buildIntegrityRow(
+                        label: 'Xác thực GPS:',
+                        value: tamper?.gpsLabel ?? 'Đang kiểm tra...',
+                        isSafe: !(tamper?.isMockLocation ?? false),
+                      ),
+                      const SizedBox(height: 4),
+                      _buildIntegrityRow(
+                        label: 'Bảo vệ màn hình:',
+                        value: tamper?.screenCaptureLabel ?? 'FLAG_SECURE',
+                        isSafe: tamper?.isScreenCaptureProtected ?? false,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Divider(),
+              ExpansionTile(
+                leading: const Icon(Icons.history_rounded, color: Color(0xFFE53935)),
+                title: const Text(
+                  'Nhật ký kiểm toán & xem vị trí',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                children: auditLogs
+                    .map(
+                      (log) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.access_time_filled, size: 16, color: Color(0xFF607D8B)),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(log)),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildIntegrityRow({
+    required String label,
+    required String value,
+    required bool isSafe,
+  }) {
+    return Row(
+      children: [
+        Icon(
+          isSafe ? Icons.check_circle_outline : Icons.cancel_outlined,
+          size: 16,
+          color: isSafe ? const Color(0xFF2E7D32) : const Color(0xFFD32F2F),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: 12,
+              color: isSafe ? const Color(0xFF2E7D32) : const Color(0xFFD32F2F),
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Hộp thoại chia sẻ hành trình ngẫu nhiên 6 chữ số với thời hạn 60 phút.
+class _TripShareDialog extends StatefulWidget {
+  const _TripShareDialog();
+
+  @override
+  State<_TripShareDialog> createState() => _TripShareDialogState();
+}
+
+class _TripShareDialogState extends State<_TripShareDialog> {
+  final TripShareService _service = TripShareService();
+  String? _code;
+  TripShare? _share;
+  Timer? _countdownTimer;
+  int _remainingSeconds = 3600;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _initTrip();
+  }
+
+  Future<void> _initTrip() async {
+    final (code, share) = await _service.createTripShare();
+    if (mounted) {
+      setState(() {
+        _code = code;
+        _share = share;
+        _remainingSeconds = share.remainingSecondsAt(DateTime.now());
+        _isLoading = false;
+      });
+      _startTimer();
+    }
+  }
+
+  void _startTimer() {
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) return;
+      if (_share == null) return;
+      final remaining = _share!.remainingSecondsAt(DateTime.now());
+      if (remaining <= 0) {
+        timer.cancel();
+      }
+      setState(() {
+        _remainingSeconds = remaining;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  String _formatDuration(int seconds) {
+    final m = (seconds ~/ 60).toString().padLeft(2, '0');
+    final s = (seconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: Row(
+        children: const [
+          Icon(Icons.alt_route_rounded, color: Color(0xFF2E7D32)),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Chia sẻ hành trình',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
           ),
         ],
       ),
-        );
-      },
+      content: _isLoading
+          ? const SizedBox(
+              height: 120,
+              child: Center(child: CircularProgressIndicator()),
+            )
+          : SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const Text(
+                    'Cung cấp mã 6 chữ số này cho người thân để theo dõi vị trí tạm thời:',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 13, color: Color(0xFF546E7A)),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F8E9),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFAED581)),
+                    ),
+                    child: Text(
+                      _code?.split('').join('  ') ?? '------',
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 4,
+                        color: Color(0xFF2E7D32),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 16, color: Color(0xFFE65100)),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Tự hủy sau: ${_formatDuration(_remainingSeconds)}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFFE65100),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFECEFF1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Mã băm SHA-256 (bảo vệ trên đường truyền):',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF455A64)),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _share?.codeHash ?? '',
+                          style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Color(0xFF607D8B)),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Đóng'),
+        ),
+      ],
     );
   }
 }

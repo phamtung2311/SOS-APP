@@ -51,7 +51,16 @@ class CryptoService {
   final X25519 _x25519 = X25519();
   final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   final AesGcm _aesGcm = AesGcm.with256bits();
+  final Sha256 _sha256 = Sha256();
   final Random _random = Random.secure();
+
+  /// Băm SHA-256 một chuỗi văn bản.
+  ///
+  /// Dùng để băm mã chia sẻ hành trình 6 chữ số trước khi lưu/truyền tin —
+  /// kẻ trung gian không thể suy ra mã gốc từ chuỗi băm.
+  Future<Hash> sha256Hash(String input) {
+    return _sha256.hash(utf8.encode(input));
+  }
 
   Future<SimpleKeyPair> generateKeyPairX25519() async {
     return _x25519.newKeyPair();

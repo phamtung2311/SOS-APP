@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Sinh trắc học: bảo vệ các vùng dữ liệu nhạy cảm (gia đình, tin nhắn,
+         nhật ký di chuyển). Bản đồ & SOS luôn miễn nhiễm theo nguyên tắc
+         Emergency Bypass. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+
     <application
         android:label="sos_safe_family"
         android:name="${applicationName}"

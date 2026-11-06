@@ -45,7 +45,9 @@ void main() {
 
     // Chạm vào mục Cá nhân để kiểm tra có mục Bảo mật
     await tester.tap(find.text('Cá nhân'));
-    await tester.pump();
+    for (int i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
     expect(find.text('Bảo mật'), findsOneWidget);
 
     // Nút SOS nổi bật.
