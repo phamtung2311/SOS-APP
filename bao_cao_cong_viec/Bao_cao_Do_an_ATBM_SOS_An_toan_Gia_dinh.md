@@ -1,12 +1,7 @@
-# BÁO CÁO ĐỒ ÁN MÔN HỌC
-# AN TOÀN VÀ BẢO MẬT TRONG PHÁT TRIỂN ỨNG DỤNG DI ĐỘNG
+# BÁO CÁO ĐỀ TÀI
+# XÂY DỰNG ỨNG DỤNG "SOS & AN TOÀN GIA ĐÌNH" TÍCH HỢP CƠ CHẾ BẢO MẬT
 
----
-
-## ĐỀ TÀI:
-# XÂY DỰNG ỨNG DỤNG "SOS & AN TOÀN GIA ĐÌNH" TÍCH HỢP MÃ HÓA ĐẦU CUỐI (E2EE) VÀ BẢO MẬT PHẦN CỨNG TRÊN THIẾT BỊ DI ĐỘNG
-
-*Theo dõi vị trí và cầu cứu khẩn cấp mã hóa đầu cuối trên hệ điều hành Android*
+*Môn học: An toàn và bảo mật trong phát triển PM di động — Lớp: L03*
 
 ---
 
@@ -16,11 +11,11 @@
 |---|---|
 | **Cơ quan chủ quản** | Ban Cơ yếu Chính phủ |
 | **Đơn vị đào tạo** | Học viện Kỹ thuật Mật mã – Khoa Công nghệ Thông tin |
-| **Môn học** | An toàn và Bảo mật trong Phát triển Ứng dụng Di động (ATBM) |
-| **Lớp học phần** | L03 |
-| **Giảng viên hướng dẫn** | TS./ThS. Thái Thị Thanh Vân |
-| **Sinh viên thực hiện** | Phạm Văn Tùng (KMA) |
-| **Năm thực hiện** | 2025 – 2026 |
+| **Môn học** | An toàn và bảo mật trong phát triển PM di động (ATBM) |
+| **Lớp học phần** | L03 (Nhóm đề tài số 17) |
+| **Giảng viên hướng dẫn** | GV: Thái Thị Thanh Vân |
+| **Sinh viên thực hiện** | 1. **Phạm Văn Tùng** — Mã SV: **CT070161** (Lớp L03)<br>2. **Phạm Nguyên Vũ** — Mã SV: **CT070165** (Lớp L03)<br>3. **Đỗ Văn Tuấn** — Mã SV: **CT070160** (Lớp L01) |
+| **Năm thực hiện** | 2026 |
 | **Mã nguồn dự án** | `/home/tung/dev/sos_safe_family` (Flutter 3.x / Dart 3.13 / Android minSdk 10) |
 | **Trạng thái kỹ thuật** | Hoàn thành toàn diện M0 → M8, **100/100 tests PASS**, `flutter analyze` 0 issue |
 
@@ -28,19 +23,23 @@
 
 # LỜI NÓI ĐẦU
 
-Trong kỷ nguyên số hóa mạnh mẽ và sự phổ cập sâu rộng của thiết bị thông minh, điện thoại di động đã trở thành vật bất ly thân của mỗi cá nhân, đóng vai trò là phương tiện liên lạc, dẫn đường và bảo đảm an toàn cuộc sống. Đặc biệt, đối với các nhóm đối tượng yếu thế như trẻ em, người cao tuổi hoặc những người làm việc trong môi trường nguy hiểm, các giải pháp công nghệ hỗ trợ giám sát vị trí thời gian thực và phát tín hiệu cứu hộ khẩn cấp (SOS) mang ý nghĩa nhân văn và giá trị thực tiễn vô cùng to lớn.
+Với sự phát triển rất nhanh của các ứng dụng di động, việc bảo mật và an toàn cho các ứng dụng là một lĩnh vực đặc biệt quan trọng vì nó được truy cập mọi lúc mọi nơi và được sử dụng bởi bất kỳ ai. Tuy vậy, không phải bất kỳ nhà phát triển ứng dụng nào cũng chú tâm đến việc bảo mật an ninh, vì vậy nhiều ứng dụng vẫn tồn tại với các nguy cơ mất an toàn và bảo mật gây ra nhiều thiệt hại cho người sử dụng và các bên liên quan.
 
-Tuy nhiên, mặt trái của các dịch vụ định vị thương mại hiện nay là sự xâm phạm nghiêm trọng đến quyền riêng tư cá nhân. Phần lớn các ứng dụng phổ thông chỉ dừng lại ở các biện pháp an ninh cơ bản như sử dụng JWT hay băm mật khẩu, trong khi toàn bộ tọa độ GPS, lịch sử di chuyển và thông tin cá nhân đều được lưu trữ dưới dạng văn bản rõ (plaintext) trên máy chủ tập trung. Điều này biến máy chủ trở thành mục tiêu béo bở của các cuộc tấn công mạng, hoặc tiềm ẩn nguy cơ rò rỉ thông tin từ chính nhân viên vận hành hệ thống.
+Chính vì thế mà nhóm chúng em đã tìm hiểu các cơ chế an toàn và bảo mật để áp dụng vào việc xây dựng ứng dụng "SOS & An toàn Gia đình" làm cho ứng dụng trở nên an toàn và bảo mật hơn với người dùng. Nội dung báo cáo gồm 4 chương:
+- **CHƯƠNG I: CƠ SỞ LÝ THUYẾT**
+- **CHƯƠNG II: TỔNG QUAN VỀ ỨNG DỤNG VÀ THIẾT KẾ HỆ THỐNG**
+- **CHƯƠNG III: TÍCH HỢP CÁC CƠ CHẾ BẢO MẬT VÀ KẾT QUẢ THỰC NGHIỆM**
+- **CHƯƠNG IV: TỔNG KẾT VÀ HƯỚNG PHÁT TRIỂN**
 
-Nhận thức sâu sắc được tầm quan trọng cốt lõi của tính bí mật và toàn vẹn dữ liệu vị trí — vốn là dữ liệu nhạy cảm phản ánh toàn bộ đời tư của con người, đề tài **"Xây dựng ứng dụng SOS & An toàn Gia đình tích hợp mã hóa đầu cuối (E2EE) và bảo mật phần cứng trên thiết bị di động"** được lựa chọn nghiên cứu và phát triển trong khuôn khổ môn học *An toàn và Bảo mật trong Phát triển Ứng dụng Di động* tại Học viện Kỹ thuật Mật mã.
+Trong quá trình thực hiện đề tài, nhóm chúng em đã cố gắng tìm hiểu tài liệu qua nhiều phương thức để tổng hợp kiến thức, học hỏi từ thầy cô và bạn bè để hoàn thành. Nhóm chúng em xin chân thành cảm ơn cô giáo **Thái Thị Thanh Vân** cùng các thầy cô trong Khoa Công nghệ Thông tin – Học viện Kỹ thuật Mật mã đã tận tình chỉ dẫn và giúp đỡ chúng em hoàn thành đề tài này.
 
-Em xin bày tỏ lòng biết ơn chân thành và sâu sắc nhất tới **cô giáo Thái Thị Thanh Vân**, người đã tận tình định hướng phương pháp luận nghiên cứu, cung cấp những gợi mở học thuật sắc bén về mô hình bảo mật di động và luôn động viên, khích lệ em trong suốt quá trình hoàn thành đồ án này. Em cũng xin gửi lời cảm ơn tới các thầy cô giáo trong Khoa Công nghệ Thông tin – Học viện Kỹ thuật Mật mã đã trang bị cho em nền tảng kiến thức vững chắc về khoa học mật mã và an toàn thông tin.
+Trong bài báo cáo còn có thiếu sót mong thầy cô và các bạn góp ý để nhóm em hoàn thiện hơn.
 
-Mặc dù đã dành nhiều tâm huyết và nỗ lực hoàn thiện từ kiến trúc lý thuyết đến kiểm thử thực nghiệm, đồ án chắc chắn khó tránh khỏi những thiếu sót nhất định. Em rất mong nhận được những ý kiến đóng góp quý báu từ quý thầy cô trong Hội đồng chấm đồ án để sản phẩm được hoàn thiện hơn nữa.
-
-*Hà Nội, tháng 11 năm 2026*  
-**Sinh viên thực hiện**  
-*Phạm Văn Tùng*
+*Hà Nội, năm 2026*  
+**Nhóm sinh viên thực hiện:**  
+1. *Phạm Văn Tùng* (CT070161)  
+2. *Phạm Nguyên Vũ* (CT070165)  
+3. *Đỗ Văn Tuấn* (CT070160)
 
 ---
 
