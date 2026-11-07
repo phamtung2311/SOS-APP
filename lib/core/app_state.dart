@@ -1,12 +1,15 @@
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:sos_safe_family/data/models/encrypted_sos_payload.dart';
 import 'package:sos_safe_family/data/models/geofence.dart';
 import 'package:sos_safe_family/data/models/sos_event.dart';
 import 'package:sos_safe_family/data/services/biometric_service.dart';
 import 'package:sos_safe_family/data/services/crypto_service.dart';
 import 'package:sos_safe_family/data/services/geofence_service.dart';
+import 'package:sos_safe_family/data/services/replay_guard.dart';
 import 'package:sos_safe_family/data/services/sos_service.dart';
 import 'package:sos_safe_family/data/services/tamper_detector.dart';
 import 'package:uuid/uuid.dart';
@@ -206,6 +209,60 @@ class AppState extends ChangeNotifier {
 
     notifyListeners();
     return event;
+  }
+
+  /// Nhận một gói tin SOS đến từ máy chủ và kích hoạt cảnh báo khẩn cấp.
+  ///
+  /// Trước khi kích hoạt, gói tin được [SosService.receiveSos] kiểm tra:
+  ///  * **Replay** (nonce trùng hoặc quá hạn) → ghi cảnh báo tấn công vào
+  ///    [auditLogs] và **không** kích hoạt cảnh báo.
+  ///  * **Can thiệp dữ liệu** (MAC sai) → tương tự, ghi log và từ chối.
+  ///
+  /// Trả về sự kiện SOS đã kích hoạt, hoặc `null` nếu gói tin bị từ chối.
+  Future<SosEvent?> receiveIncomingSos({
+    required String encryptedEventBase64,
+    required String encryptedLocationBase64,
+    required Uint8List key,
+  }) async {
+    try {
+      final SosEvent event = await _sosService.handleIncomingSos(
+        encryptedPayload: EncryptedSosPayload(
+          event: SosEvent.fromJson(const <String, dynamic>{}),
+          encryptedEvent: encryptedEventBase64,
+          encryptedLocation: encryptedLocationBase64,
+        ),
+        sharedKey: SecretKey(key),
+      );
+
+      _activeSos = event;
+      final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+      addAuditLog(
+        '$hhmm - Nhận cảnh báo SOS hợp lệ từ "${event.senderName}" '
+        '(đã giải mã E2EE)',
+      );
+      notifyListeners();
+      return event;
+    } on ReplayAttackException catch (e) {
+      final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+      final String reason = switch (e.verdict) {
+        ReplayVerdict.expired => 'gói tin quá hạn',
+        ReplayVerdict.duplicateNonce => 'nonce trùng (gói tin bị phát lại)',
+        ReplayVerdict.accepted => 'không xác định',
+      };
+      addAuditLog(
+        '$hhmm - CẢNH BÁO TẤN CÔNG: từ chối gói tin SOS bị phát lại ($reason)',
+      );
+      notifyListeners();
+      return null;
+    } on SecretBoxAuthenticationError {
+      final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+      addAuditLog(
+        '$hhmm - CẢNH BÁO TẤN CÔNG: từ chối gói tin SOS bị can thiệp dữ liệu '
+        '(MAC không khớp)',
+      );
+      notifyListeners();
+      return null;
+    }
   }
 
   /// Người dùng xác nhận an toàn → chuyển sự kiện `ACTIVE` → `RESOLVED`.

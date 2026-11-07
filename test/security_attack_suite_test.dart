@@ -291,6 +291,149 @@ void main() {
   });
 
   // ------------------------------------------------------------------
+  // Kịch bản 3b: Tích hợp ReplayGuard vào luồng nhận SOS (Milestone 7)
+  // ------------------------------------------------------------------
+  group('ATK-03b ReplayGuard tích hợp vào SosService & AppState', () {
+    late CryptoService crypto;
+    late Uint8List key;
+
+    setUp(() async {
+      crypto = CryptoService();
+      final alice = await crypto.generateKeyPairX25519();
+      final bob = await crypto.generateKeyPairX25519();
+      final shared = await crypto.deriveSharedKey(
+        myKeyPair: alice,
+        theirPublicKey: await crypto.importPublicKey(
+          await crypto.exportPublicKey(bob),
+        ),
+      );
+      key = Uint8List.fromList(await shared.extractBytes());
+    });
+
+    SosEvent buildEvent({Duration age = Duration.zero}) => SosEvent(
+          sosId: 'sos-replay-int',
+          senderName: 'Mai',
+          lat: 21.0285,
+          lng: 105.8542,
+          isMocked: false,
+          batteryLevel: 87,
+          timestamp: DateTime.now().subtract(age),
+        );
+
+    test('SosService.receiveSos: gói tin hợp lệ -> giải mã & kích hoạt',
+        () async {
+      final sosService = SosService(cryptoService: crypto);
+      final wire =
+          await sosService.encryptEvent(event: buildEvent(), key: key);
+
+      final received = await sosService.receiveSos(
+        encryptedEventBase64: wire.encryptedEvent,
+        encryptedLocationBase64: wire.encryptedLocation,
+        key: key,
+      );
+
+      expect(received.sosId, 'sos-replay-int');
+      expect(received.lat, 21.0285);
+      expect(received.lng, 105.8542);
+      expect(received.isActive, isTrue);
+    });
+
+    test('SosService.receiveSos: phát lại cùng gói tin -> ném '
+        'ReplayAttackException (duplicateNonce)', () async {
+      final sosService = SosService(cryptoService: crypto);
+      final wire =
+          await sosService.encryptEvent(event: buildEvent(), key: key);
+
+      // Lần 1: hợp lệ.
+      await sosService.receiveSos(
+        encryptedEventBase64: wire.encryptedEvent,
+        encryptedLocationBase64: wire.encryptedLocation,
+        key: key,
+      );
+
+      // Lần 2: cùng nonce -> từ chối (replay).
+      expect(
+        () => sosService.receiveSos(
+          encryptedEventBase64: wire.encryptedEvent,
+          encryptedLocationBase64: wire.encryptedLocation,
+          key: key,
+        ),
+        throwsA(isA<ReplayAttackException>()),
+      );
+    });
+
+    test('SosService.receiveSos: gói tin quá hạn tuổi -> ném '
+        'ReplayAttackException (expired)', () async {
+      final sosService = SosService(cryptoService: crypto);
+      // Timestamp cũ 50 phút -> vượt ngưỡng AppConstants.sosExpiresAfter (30').
+      final wire = await sosService.encryptEvent(
+        event: buildEvent(age: const Duration(minutes: 50)),
+        key: key,
+      );
+
+      expect(
+        () => sosService.receiveSos(
+          encryptedEventBase64: wire.encryptedEvent,
+          encryptedLocationBase64: wire.encryptedLocation,
+          key: key,
+        ),
+        throwsA(isA<ReplayAttackException>()),
+      );
+    });
+
+    test('AppState.receiveIncomingSos: gói tin hợp lệ kích hoạt cảnh báo '
+        'và ghi audit log', () async {
+      final sender = SosService(cryptoService: crypto);
+      final wire =
+          await sender.encryptEvent(event: buildEvent(), key: key);
+
+      final state = AppState(cryptoService: crypto);
+      final received = await state.receiveIncomingSos(
+        encryptedEventBase64: wire.encryptedEvent,
+        encryptedLocationBase64: wire.encryptedLocation,
+        key: key,
+      );
+
+      expect(received, isNotNull);
+      expect(received!.sosId, 'sos-replay-int');
+      expect(state.isSosActive, isTrue);
+      expect(
+          state.auditLogs.any((String l) => l.contains('Nhận cảnh báo SOS')),
+          isTrue);
+    });
+
+    test('AppState.receiveIncomingSos: replay bị từ chối, không kích hoạt, '
+        'ghi cảnh báo tấn công vào audit log', () async {
+      final sender = SosService(cryptoService: crypto);
+      final wire =
+          await sender.encryptEvent(event: buildEvent(), key: key);
+
+      final state = AppState(cryptoService: crypto);
+
+      // Gói tin đầu: hợp lệ.
+      final first = await state.receiveIncomingSos(
+        encryptedEventBase64: wire.encryptedEvent,
+        encryptedLocationBase64: wire.encryptedLocation,
+        key: key,
+      );
+      expect(first, isNotNull);
+      expect(state.isSosActive, isTrue);
+
+      // Kẻ tấn công phát lại đúng gói tin cũ.
+      final replay = await state.receiveIncomingSos(
+        encryptedEventBase64: wire.encryptedEvent,
+        encryptedLocationBase64: wire.encryptedLocation,
+        key: key,
+      );
+
+      expect(replay, isNull, reason: 'gói tin phát lại phải bị từ chối');
+      expect(
+          state.auditLogs.any((String l) => l.contains('TẤN CÔNG')), isTrue,
+          reason: 'phải ghi cảnh báo tấn công vào nhật ký kiểm toán');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Kịch bản 4: Tấn công giả mạo vị trí (Mock GPS Spoofing)
   // ------------------------------------------------------------------
   group('ATK-04 Mock GPS spoofing', () {

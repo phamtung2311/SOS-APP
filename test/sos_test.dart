@@ -3,8 +3,10 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sos_safe_family/data/models/encrypted_sos_payload.dart';
 import 'package:sos_safe_family/data/models/sos_event.dart';
 import 'package:sos_safe_family/data/services/crypto_service.dart';
+import 'package:sos_safe_family/data/services/replay_guard.dart';
 import 'package:sos_safe_family/data/services/sos_service.dart';
 
 void main() {
@@ -273,6 +275,153 @@ void main() {
       expect(wire.containsKey('lat'), isFalse);
       expect(wire.containsKey('lng'), isFalse);
       expect(jsonEncode(wire).contains('21.0285'), isFalse);
+    });
+  });
+
+  group('Tích hợp ReplayGuard vào luồng nhận SOS (handleIncomingSos)', () {
+    late CryptoService crypto;
+    late SosService sosService;
+    late Uint8List key;
+
+    setUp(() async {
+      crypto = CryptoService();
+      sosService = SosService(cryptoService: crypto);
+
+      final alice = await crypto.generateKeyPairX25519();
+      final bob = await crypto.generateKeyPairX25519();
+      final shared = await crypto.deriveSharedKey(
+        myKeyPair: alice,
+        theirPublicKey: await crypto.importPublicKey(
+          await crypto.exportPublicKey(bob),
+        ),
+      );
+      key = Uint8List.fromList(await shared.extractBytes());
+    });
+
+    SosEvent buildEvent({Duration age = Duration.zero}) => SosEvent(
+          sosId: 'sos-replay-01',
+          senderName: 'Mai',
+          lat: 21.0285,
+          lng: 105.8542,
+          isMocked: false,
+          batteryLevel: 87,
+          timestamp: DateTime.now().subtract(age),
+        );
+
+    test('gói SOS hợp lệ được chấp nhận và giải mã đúng toạ độ', () async {
+      final payload = await sosService.encryptEvent(
+        event: buildEvent(),
+        key: key,
+      );
+
+      final received = await sosService.handleIncomingSos(
+        encryptedPayload: payload,
+        sharedKey: SecretKey(key),
+      );
+
+      expect(received.sosId, 'sos-replay-01');
+      expect(received.senderName, 'Mai');
+      expect(received.lat, 21.0285);
+      expect(received.lng, 105.8542);
+      expect(received.batteryLevel, 87);
+      expect(received.isActive, isTrue);
+    });
+
+    test('gói SOS gửi lại cùng nonce bị từ chối với duplicateNonce', () async {
+      final payload = await sosService.encryptEvent(
+        event: buildEvent(),
+        key: key,
+      );
+
+      // Lần 1: hợp lệ.
+      await sosService.handleIncomingSos(
+        encryptedPayload: payload,
+        sharedKey: SecretKey(key),
+      );
+
+      // Lần 2: cùng nonce -> chặn đứng.
+      expect(
+        () => sosService.handleIncomingSos(
+          encryptedPayload: payload,
+          sharedKey: SecretKey(key),
+        ),
+        throwsA(
+          isA<ReplayAttackException>().having(
+            (ReplayAttackException e) => e.verdict,
+            'verdict',
+            ReplayVerdict.duplicateNonce,
+          ),
+        ),
+      );
+    });
+
+    test('gói SOS cũ hơn AppConstants.sosExpiresAfter bị từ chối với expired',
+        () async {
+      // Timestamp cũ 50 phút -> vượt ngưỡng 30 phút.
+      final payload = await sosService.encryptEvent(
+        event: buildEvent(age: const Duration(minutes: 50)),
+        key: key,
+      );
+
+      expect(
+        () => sosService.handleIncomingSos(
+          encryptedPayload: payload,
+          sharedKey: SecretKey(key),
+        ),
+        throwsA(
+          isA<ReplayAttackException>().having(
+            (ReplayAttackException e) => e.verdict,
+            'verdict',
+            ReplayVerdict.expired,
+          ),
+        ),
+      );
+    });
+
+    test('gói SOS bị can thiệp ciphertext bị từ chối bởi MAC', () async {
+      final payload = await sosService.encryptEvent(
+        event: buildEvent(),
+        key: key,
+      );
+
+      final tampered = payload.encryptedEvent.replaceRange(
+        payload.encryptedEvent.length - 2,
+        payload.encryptedEvent.length - 1,
+        payload.encryptedEvent.endsWith('A') ? 'B' : 'A',
+      );
+
+      expect(
+        () => sosService.handleIncomingSos(
+          encryptedPayload: EncryptedSosPayload(
+            event: payload.event,
+            encryptedEvent: tampered,
+            encryptedLocation: payload.encryptedLocation,
+            sentAt: payload.sentAt,
+          ),
+          sharedKey: SecretKey(key),
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+    });
+
+    test('ReplayGuard từ chối gói tin hợp lệ trước khi tốn công giải mã',
+        () async {
+      // Guard dùng chung: gói tin đã đi qua 1 lần sẽ bị chặn ở lần 2.
+      final guard = ReplayGuard();
+      final guarded = SosService(cryptoService: crypto, replayGuard: guard);
+      final payload = await guarded.encryptEvent(
+        event: buildEvent(),
+        key: key,
+      );
+
+      await guarded.handleIncomingSos(
+        encryptedPayload: payload,
+        sharedKey: SecretKey(key),
+      );
+
+      expect(guard.trackedNonceCount, 1);
+      expect(guard.hasSeen(payload.nonceBase64), isTrue);
+      expect(payload.nonceBase64, isNotEmpty);
     });
   });
 }
