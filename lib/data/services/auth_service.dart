@@ -57,26 +57,24 @@ class UserSecurityProfile {
 /// kết hợp cơ chế Key Provisioning (Android Keystore + Firestore).
 class AuthService {
   AuthService({
-    fb_auth.FirebaseAuth? auth,
+    this.auth,
     GoogleSignIn? googleSignIn,
-    FirebaseFirestore? firestore,
+    this.firestore,
     CryptoService? cryptoService,
     SecureStorageService? secureStorage,
-  })  : _auth = auth,
-        _googleSignIn = googleSignIn ?? GoogleSignIn(),
-        _firestore = firestore,
+  })  : _googleSignIn = googleSignIn ?? GoogleSignIn(),
         _crypto = cryptoService ?? CryptoService(),
         _storage = secureStorage ?? SecureStorageService();
 
-  final fb_auth.FirebaseAuth? _auth;
+  final fb_auth.FirebaseAuth? auth;
   final GoogleSignIn _googleSignIn;
-  final FirebaseFirestore? _firestore;
+  final FirebaseFirestore? firestore;
   final CryptoService _crypto;
   final SecureStorageService _storage;
 
-  fb_auth.FirebaseAuth get _safeAuth => _auth ?? fb_auth.FirebaseAuth.instance;
+  fb_auth.FirebaseAuth get _safeAuth => auth ?? fb_auth.FirebaseAuth.instance;
   FirebaseFirestore get _safeFirestore =>
-      _firestore ?? FirebaseFirestore.instance;
+      firestore ?? FirebaseFirestore.instance;
 
   UserSecurityProfile? _currentProfile;
   UserSecurityProfile? get currentProfile => _currentProfile;
