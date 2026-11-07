@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -6,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:sos_safe_family/data/models/encrypted_sos_payload.dart';
 import 'package:sos_safe_family/data/models/geofence.dart';
 import 'package:sos_safe_family/data/models/sos_event.dart';
+import 'package:sos_safe_family/data/services/auth_service.dart';
 import 'package:sos_safe_family/data/services/biometric_service.dart';
 import 'package:sos_safe_family/data/services/crypto_service.dart';
 import 'package:sos_safe_family/data/services/geofence_service.dart';
@@ -24,18 +26,40 @@ class AppState extends ChangeNotifier {
     CryptoService? cryptoService,
     BiometricService? biometricService,
     TamperDetector? tamperDetector,
+    AuthService? authService,
   })  : _crypto = cryptoService ?? CryptoService(),
         _biometric = biometricService ?? BiometricService(),
-        _tamper = tamperDetector ?? TamperDetector() {
+        _tamper = tamperDetector ?? TamperDetector(),
+        _auth = authService ?? AuthService(cryptoService: cryptoService) {
     _sosService = SosService(cryptoService: _crypto);
     _geofences = GeofenceService.seedGeofences();
+    _initAuthListener();
   }
 
   final CryptoService _crypto;
   final BiometricService _biometric;
   final TamperDetector _tamper;
+  final AuthService _auth;
+  StreamSubscription<UserSecurityProfile?>? _authSub;
   late final SosService _sosService;
   final Uuid _uuid = const Uuid();
+
+  // ---- Tài khoản & Mật mã ----
+  UserSecurityProfile? _userProfile;
+  bool _isAuthLoading = false;
+
+  void _initAuthListener() {
+    try {
+      _authSub = _auth.authStateChanges().listen((profile) {
+        _userProfile = profile;
+        notifyListeners();
+      }, onError: (e) {
+        debugPrint('[AppState] authStateChanges error: $e');
+      });
+    } catch (e) {
+      debugPrint('[AppState] auth init skipped: $e');
+    }
+  }
 
   // ---- Vị trí ----
   Position? _lastPosition;
@@ -70,6 +94,11 @@ class AppState extends ChangeNotifier {
   // ---------------------------------------------------------------------
   // Getters
   // ---------------------------------------------------------------------
+
+  UserSecurityProfile? get userProfile => _userProfile;
+  bool get isSignedIn => _userProfile != null;
+  bool get isAuthLoading => _isAuthLoading;
+  AuthService get authService => _auth;
 
   Position? get lastPosition => _lastPosition;
   LatLng? get currentLocation => _currentLocation;
@@ -316,6 +345,45 @@ class AppState extends ChangeNotifier {
     _tamperReport = report;
     notifyListeners();
     return report;
+  }
+  /// Đăng nhập bằng Google + Tự động sinh/nạp cặp khóa X25519 Keystore.
+  Future<bool> signInWithGoogle() async {
+    _isAuthLoading = true;
+    notifyListeners();
+    try {
+      final profile = await _auth.signInWithGoogle();
+      if (profile != null) {
+        _userProfile = profile;
+        _auditLogs.insert(
+          0,
+          '[XÁC THỰC] Đăng nhập Google: ${profile.email} • Khóa X25519 Keystore: ${profile.publicKeyFingerprint}',
+        );
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _auditLogs.insert(0, '[CẢNH BÁO] Đăng nhập Google thất bại: $e');
+      rethrow;
+    } finally {
+      _isAuthLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Đăng xuất tài khoản người dùng.
+  Future<void> signOut() async {
+    final email = _userProfile?.email ?? 'Người dùng';
+    await _auth.signOut();
+    _userProfile = null;
+    _auditLogs.insert(0, '[XÁC THỰC] Đã đăng xuất tài khoản: $email');
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    super.dispose();
   }
 }
 

@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "627366362598",
+    "project_id": "sos-safe-family",
+    "storage_bucket": "sos-safe-family.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:627366362598:android:b211747c18c1af860d2a27",
+        "android_client_info": {
+          "package_name": "vn.atbm.sos.sos_safe_family"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "627366362598-csfricf73e4482b2gi8skfa4ibdnoiog.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "vn.atbm.sos.sos_safe_family",
+            "certificate_hash": "3db3320bc2711e7e01d8f6cfe3c15ced3243bf96"
+          }
+        },
+        {
+          "client_id": "627366362598-q9po89a8uo7sqmju0ilvmngh7qsk1km3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBJ5Hhw7xP_vW5U3OBU72GntyVF9EgDhhw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "627366362598-q9po89a8uo7sqmju0ilvmngh7qsk1km3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

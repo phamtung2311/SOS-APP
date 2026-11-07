@@ -53,6 +53,7 @@ dependencies:
   uuid: ^4.6.0
   intl: ^0.20.3
   image_picker: ^1.2.4
+  google_sign_in: ^6.2.2
 
 dev_dependencies:
   flutter_test:

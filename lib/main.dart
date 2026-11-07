@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
@@ -14,7 +15,13 @@ import 'package:sos_safe_family/data/services/trip_share_service.dart';
 import 'package:sos_safe_family/presentation/screens/family_chat_screen.dart';
 import 'package:sos_safe_family/presentation/screens/sos_countdown_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint('[Firebase] Khởi tạo bỏ qua hoặc ngoại lệ: $e');
+  }
   runApp(const SOSFamilyApp());
 }
 
@@ -1322,6 +1329,9 @@ class ProfileScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final user = state.userProfile;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Cá nhân'),
@@ -1331,7 +1341,7 @@ class ProfileScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // Thẻ thông tin cá nhân
+          // Thẻ thông tin cá nhân / Đăng nhập
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -1345,65 +1355,163 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ],
             ),
-            child: Row(
-              children: [
-                const CircleAvatar(
-                  radius: 30,
-                  backgroundColor: Color(0xFF1E88E5),
-                  child: Text(
-                    'T',
-                    style: TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            child: user != null
+                ? Row(
                     children: [
-                      const Text(
-                        'Phạm Văn Tùng',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF18191F),
+                      CircleAvatar(
+                        radius: 30,
+                        backgroundColor: const Color(0xFF1E88E5),
+                        backgroundImage: user.photoUrl != null
+                            ? NetworkImage(user.photoUrl!)
+                            : null,
+                        child: user.photoUrl == null
+                            ? Text(
+                                user.displayName.isNotEmpty
+                                    ? user.displayName[0].toUpperCase()
+                                    : 'U',
+                                style: const TextStyle(
+                                  fontSize: 26,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : null,
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              user.displayName,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF18191F),
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              user.email,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE8F5E9),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Text(
+                                '🛡 E2EE Keystore Active',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF2E7D32),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        'phamvantunghn2b@gmail.com',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          color: Colors.grey.shade600,
-                        ),
+                    ],
+                  )
+                : Column(
+                    children: [
+                      Row(
+                        children: [
+                          const CircleAvatar(
+                            radius: 28,
+                            backgroundColor: Color(0xFFECEFF1),
+                            child: Icon(
+                              Icons.account_circle_outlined,
+                              size: 34,
+                              color: Color(0xFF78909C),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Chưa đăng nhập',
+                                  style: TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF263238),
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Đăng nhập Google để kích hoạt E2EE Keystore',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFE8F5E9),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Text(
-                          '🛡 Chủ hộ • Đã kích hoạt E2EE',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF2E7D32),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 46,
+                        child: ElevatedButton.icon(
+                          onPressed: state.isAuthLoading
+                              ? null
+                              : () async {
+                                  try {
+                                    await state.signInWithGoogle();
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Đăng nhập thất bại: $e'),
+                                          backgroundColor: Colors.red.shade700,
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                          icon: state.isAuthLoading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.login_rounded, size: 20),
+                          label: Text(
+                            state.isAuthLoading
+                                ? 'Đang xác thực...'
+                                : 'Đăng nhập với Google',
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1E88E5),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
                           ),
                         ),
                       ),
                     ],
                   ),
-                ),
-              ],
-            ),
           ),
           const SizedBox(height: 20),
 
@@ -1516,16 +1624,168 @@ class ProfileScreen extends StatelessWidget {
                     'Khóa mật mã X25519',
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
-                  subtitle: const Text(
-                    'Khóa riêng tư lưu trữ trong Android Keystore',
-                    style: TextStyle(fontSize: 12),
+                  subtitle: Text(
+                    user != null
+                        ? 'Vân tay: ${user.publicKeyFingerprint}'
+                        : 'Khóa riêng tư lưu trữ trong Android Keystore',
+                    style: const TextStyle(fontSize: 12),
                   ),
-                  trailing: const Icon(
-                    Icons.verified_user_rounded,
-                    color: Color(0xFF43A047),
-                    size: 20,
-                  ),
+                  trailing: user != null
+                      ? IconButton(
+                          icon: const Icon(
+                            Icons.info_outline_rounded,
+                            color: Color(0xFF7E57C2),
+                          ),
+                          onPressed: () {
+                            showModalBottomSheet(
+                              context: context,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(20),
+                                ),
+                              ),
+                              builder: (ctx) => Padding(
+                                padding: const EdgeInsets.all(20),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Row(
+                                      children: [
+                                        Icon(Icons.security, color: Color(0xFF7E57C2)),
+                                        SizedBox(width: 8),
+                                        Text(
+                                          'Chứng Chỉ Mật Mã X25519',
+                                          style: TextStyle(
+                                            fontSize: 17,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 16),
+                                    const Text(
+                                      'Mã vân tay an toàn (Out-of-band Fingerprint):',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    SelectableText(
+                                      user.publicKeyFingerprint,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: Color(0xFF1E88E5),
+                                        letterSpacing: 1.2,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 14),
+                                    const Text(
+                                      'Khóa công khai (Public Key Base64):',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    SelectableText(
+                                      user.publicKeyB64,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontFamily: 'monospace',
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.verified,
+                                          color: Color(0xFF2E7D32),
+                                          size: 18,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          child: Text(
+                                            'Khóa private được bảo vệ bởi Android Keystore (TEE Hardware-backed)',
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              color: Colors.grey.shade700,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                      : const Icon(
+                          Icons.verified_user_rounded,
+                          color: Color(0xFF43A047),
+                          size: 20,
+                        ),
                 ),
+                if (user != null) ...[
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFEBEE),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.logout_rounded,
+                        color: Color(0xFFD32F2F),
+                      ),
+                    ),
+                    title: const Text(
+                      'Đăng xuất',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFD32F2F),
+                      ),
+                    ),
+                    subtitle: const Text(
+                      'Đăng xuất tài khoản khỏi thiết bị này',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    onTap: () async {
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Xác nhận đăng xuất'),
+                          content: const Text(
+                            'Bạn có chắc chắn muốn đăng xuất? Khóa riêng tư trong Keystore vẫn được bảo vệ an toàn cho lần đăng nhập tới.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Hủy'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFD32F2F),
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Đăng xuất'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirmed == true) {
+                        await state.signOut();
+                      }
+                    },
+                  ),
+                ],
               ],
             ),
           ),

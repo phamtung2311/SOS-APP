@@ -71,6 +71,39 @@ class CryptoService {
     return base64Encode(publicKey.bytes);
   }
 
+  /// Trích xuất Private Key (32 byte) thành chuỗi Base64 để lưu vào Android Keystore.
+  Future<String> exportPrivateKey(SimpleKeyPair keyPair) async {
+    final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
+    return base64Encode(privateKeyBytes);
+  }
+
+  /// Tái tạo cặp khóa SimpleKeyPair từ chuỗi Base64 đã lưu trong Android Keystore.
+  Future<SimpleKeyPair> importKeyPair({
+    required String privateKeyB64,
+    required String publicKeyB64,
+  }) async {
+    final privBytes = base64Decode(privateKeyB64);
+    final pubBytes = base64Decode(publicKeyB64);
+    return SimpleKeyPairData(
+      privBytes,
+      publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
+      type: KeyPairType.x25519,
+    );
+  }
+
+  /// Tính mã vân tay an toàn SHA-256 (Security Fingerprint) của Khóa công khai.
+  ///
+  /// Định dạng 8 cụm hex (ví dụ: `A1:B2:C3:D4:E5:F6:07:88`) dùng cho việc
+  /// đối soát khóa ngoài băng tần (Out-of-band verification) giữa 2 người thân.
+  Future<String> getPublicKeyFingerprint(String publicKeyB64) async {
+    final pubBytes = base64Decode(publicKeyB64);
+    final hash = await _sha256.hash(pubBytes);
+    return hash.bytes
+        .take(8)
+        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+        .join(':');
+  }
+
   Future<SimplePublicKey> importPublicKey(String base64Key) async {
     final keyBytes = base64Decode(base64Key);
     if (keyBytes.length != 32) {
