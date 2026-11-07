@@ -777,7 +777,7 @@ class _MapScreenState extends State<MapScreen> {
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+                urlTemplate: 'https://mt1.google.com/vt/lyrs=m&hl=vi&x={x}&y={y}&z={z}',
                 userAgentPackageName: 'vn.atbm.sos.sos_safe_family',
               ),
               // Vùng an toàn (geofence) — vòng tròn bán kính tính bằng mét.
