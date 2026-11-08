@@ -1759,13 +1759,18 @@ class _CircleScreenState extends State<CircleScreen> {
                 const Divider(),
                 const SizedBox(height: 8),
                 const Text(
-                  'HOẶC NHẬP MÃ CỦA NGƯỜI KHÁC:',
+                  'HOẶC NHẬP MÃ CỦA NGƯỜI KHÁC (MÃ MỜI 1 CHIỀU):',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF1E88E5),
                     letterSpacing: 1.1,
                   ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Kết nối ngay, không cần chấp thuận của đối phương. Đây là đường mã mời 1 chiều khác với lời mời email chờ đồng ý.',
+                  style: TextStyle(fontSize: 11, color: Colors.black54, height: 1.4),
                 ),
                 const SizedBox(height: 10),
                 TextField(
@@ -2127,7 +2132,7 @@ class _CircleScreenState extends State<CircleScreen> {
                                     const Icon(Icons.mark_email_unread_rounded, color: Color(0xFFE65100), size: 20),
                                     const SizedBox(width: 8),
                                     Text(
-                                      'Yêu cầu chia sẻ vị trí mới (${incoming.length})',
+                                      'Đang chờ bạn đồng ý (${incoming.length})',
                                       style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFE65100), fontSize: 14),
                                     ),
                                   ],
@@ -2208,7 +2213,7 @@ class _CircleScreenState extends State<CircleScreen> {
                                 const Icon(Icons.hourglass_top_rounded, size: 16, color: Color(0xFFF57C00)),
                                 const SizedBox(width: 6),
                                 Text(
-                                  'Đang chờ đối phương chấp thuận (${outgoing.length})',
+                                  'Đang chờ đồng ý (A gửi) (${outgoing.length})',
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFFF57C00)),
                                 ),
                               ],
@@ -2266,22 +2271,23 @@ class _CircleScreenState extends State<CircleScreen> {
                                           const SizedBox(width: 6),
                                           const Expanded(
                                             child: Text(
-                                              'Vị trí sẽ hiển thị ngay khi đối phương bấm đồng ý.',
+                                              'Vị trí sẽ hiển thị sau khi đối phương đồng ý • đây là lời mời email chờ chấp nhận.',
                                               style: TextStyle(fontSize: 11, color: Colors.black87),
                                             ),
                                           ),
-                                          TextButton.icon(
-                                            onPressed: () => appState.simulatePeerApproval(out.id),
-                                            icon: const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF2E7D32)),
-                                            label: const Text(
-                                              'Mô phỏng: Đồng ý',
-                                              style: TextStyle(fontSize: 11, color: Color(0xFF2E7D32), fontWeight: FontWeight.bold),
+                                          if (kDebugMode)
+                                            TextButton.icon(
+                                              onPressed: () => appState.simulatePeerApproval(out.id),
+                                              icon: const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF2E7D32)),
+                                              label: const Text(
+                                                'DEBUG: Mô phỏng đồng ý',
+                                                style: TextStyle(fontSize: 11, color: Color(0xFF2E7D32), fontWeight: FontWeight.bold),
+                                              ),
+                                              style: TextButton.styleFrom(
+                                                visualDensity: VisualDensity.compact,
+                                                padding: const EdgeInsets.symmetric(horizontal: 6),
+                                              ),
                                             ),
-                                            style: TextButton.styleFrom(
-                                              visualDensity: VisualDensity.compact,
-                                              padding: const EdgeInsets.symmetric(horizontal: 6),
-                                            ),
-                                          ),
                                         ],
                                       ),
                                     ),
@@ -2302,7 +2308,7 @@ class _CircleScreenState extends State<CircleScreen> {
                                 const Icon(Icons.verified_user_rounded, size: 16, color: Color(0xFF2E7D32)),
                                 const SizedBox(width: 6),
                                 Text(
-                                  'Thành viên đã kết nối (${accepted.length})',
+                                  'Đã kết nối (${accepted.length})',
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF2E7D32)),
                                 ),
                               ],

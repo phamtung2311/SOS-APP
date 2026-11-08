@@ -59,6 +59,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
 
   String _peerDisplayName = '';
   String? _peerEmail;
+  String _resolvedPeerUid = '';
   bool _isDemoFallbackRoom = false;
 
   @override
@@ -94,13 +95,29 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       _myName = user?.displayName ?? 'Tôi';
     } catch (_) {}
 
-    final peerUid = widget.memberId;
-    if (_myUid != null && _myUid!.isNotEmpty && peerUid != null && peerUid.isNotEmpty && !peerUid.contains('-')) {
-      final sortedUids = [_myUid!, peerUid]..sort();
-      _chatId = 'chat_${sortedUids[0]}_${sortedUids[1]}';
+    _peerDisplayName = widget.memberName;
+    _peerEmail = widget.peerEmail;
+    _resolvedPeerUid = (widget.memberId ?? '').trim();
+
+    if (_resolvedPeerUid.isNotEmpty && (AppState.isUidLike(_resolvedPeerUid) || _resolvedPeerUid.startsWith('uid_'))) {
+      // giữ UID thật nếu peer đã có doc users
+    } else if (widget.peerEmail != null && widget.peerEmail!.trim().isNotEmpty) {
+      try {
+        final emailLookup = await FirebaseFirestore.instance
+            .collection('users')
+            .where('email', isEqualTo: widget.peerEmail!.trim().toLowerCase())
+            .limit(1)
+            .get();
+        if (emailLookup.docs.isNotEmpty) {
+          _resolvedPeerUid = emailLookup.docs.first.id;
+        }
+      } catch (_) {}
+    }
+
+    if (_myUid != null && _myUid!.isNotEmpty && _resolvedPeerUid.isNotEmpty && AppState.isUidLike(_resolvedPeerUid)) {
+      _chatId = AppState.buildChatRoomId(myUid: _myUid!, peerUid: _resolvedPeerUid);
       _isDemoFallbackRoom = false;
     } else {
-      // Fallback email-based CHỈ khi 1 bên chưa login — giữ làm demo mode, có nhãn
       final myE = (_myEmail ?? 'user_a').trim().toLowerCase();
       final peerE = (widget.peerEmail ?? widget.memberName).trim().toLowerCase();
       final sorted = [myE, peerE]..sort();
@@ -108,17 +125,14 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       _isDemoFallbackRoom = true;
     }
 
-    _peerDisplayName = widget.memberName;
-    _peerEmail = widget.peerEmail;
-
     // 1. Thử truy vấn Public Key của peer từ Cloud Firestore
     String? peerPublicKeyB64;
     try {
-      // Thứ tự tra: (1) users/{member.id} (đã là uid thật) -> (2) where('email') chỉ khi demo chưa có uid
-      if (widget.memberId != null && widget.memberId!.isNotEmpty) {
+      final peerLookupUid = _resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : widget.memberId;
+      if (peerLookupUid != null && peerLookupUid.isNotEmpty) {
         final doc = await FirebaseFirestore.instance
             .collection('users')
-            .doc(widget.memberId)
+            .doc(peerLookupUid)
             .get();
         if (doc.exists && doc.data() != null) {
           final data = doc.data()!;
@@ -151,14 +165,13 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
           if (dbEmail != null && dbEmail.isNotEmpty) {
             _peerEmail = dbEmail;
           }
+          _resolvedPeerUid = query.docs.first.id;
         }
       }
-      // Tuyệt đối KHÔNG tra cứu theo displayName vì gây xung đột khi trùng tên
     } catch (e) {
       debugPrint('[FamilyChatScreen] Lỗi truy vấn Firestore lấy peer key: $e');
     }
 
-    // 2. Thỏa thuận khóa E2EE ECDH X25519 với khóa bí mật trong Keystore
     Uint8List? keyBytes;
     bool isE2eeSuccess = false;
 
@@ -183,21 +196,17 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       }
     }
 
-    // 3. Thiếu peer key hoặc ngoại lệ -> Fallback deriveRoomKey
     if (!isE2eeSuccess || keyBytes == null) {
       keyBytes = await _crypto.deriveRoomKey(_chatId);
       isE2eeSuccess = false;
       debugPrint('[FamilyChatScreen] ⚠️ Thiếu peer key -> Fallback deriveRoomKey (demo)');
     }
 
-    // Cập nhật trường members cho doc chats/{chatId} phục vụ Firestore Security Rules
     try {
       final membersList = <String>[];
       if (_myUid != null && _myUid!.isNotEmpty) membersList.add(_myUid!);
-      if (widget.memberId != null &&
-          widget.memberId!.isNotEmpty &&
-          !membersList.contains(widget.memberId)) {
-        membersList.add(widget.memberId!);
+      if (_resolvedPeerUid.isNotEmpty && !membersList.contains(_resolvedPeerUid)) {
+        membersList.add(_resolvedPeerUid);
       }
       if (membersList.isNotEmpty) {
         await FirebaseFirestore.instance
@@ -220,6 +229,9 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       _hasConnectionError = false;
     });
 
+    debugPrint(
+      '[CHAT] room=$_chatId kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} key=${_isE2EE ? 'E2EE' : 'demo'} myUid=${_myUid ?? 'null'} peerUid=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'null')}',
+    );
     _listenToMessages(keyBytes);
   }
 
@@ -674,6 +686,11 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'room=${_chatId.isNotEmpty ? _chatId : 'unknown'} | kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} | key=${_isE2EE ? 'E2EE' : 'demo'} | member=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'n/a')}',
+                    style: const TextStyle(fontSize: 9.5, color: Color(0xFF607D8B)),
                   ),
                 ],
               ),
