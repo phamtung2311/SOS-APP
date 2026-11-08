@@ -17,7 +17,6 @@ import 'package:sos_safe_family/data/services/geofence_service.dart';
 import 'package:sos_safe_family/data/services/location_share_service.dart';
 import 'package:sos_safe_family/data/services/push_service.dart';
 import 'package:sos_safe_family/data/services/replay_guard.dart';
-import 'package:sos_safe_family/data/services/secure_storage_service.dart';
 import 'package:sos_safe_family/data/services/sos_service.dart';
 import 'package:sos_safe_family/data/services/tamper_detector.dart';
 import 'package:uuid/uuid.dart';
@@ -205,6 +204,7 @@ class AppState extends ChangeNotifier {
     _outgoingInvitationSub?.cancel();
     initSosListener();
     initLocationListeners();
+    syncCircleMembersToFirestore();
     _pushService.initialize(
       currentUserUid: profile.uid,
       onForegroundMessage: (message) {
@@ -288,6 +288,9 @@ class AppState extends ChangeNotifier {
       _familyMembers.add(member);
     } else {
       _familyMembers[index] = member;
+    }
+    if (resolvedStatus == MemberConnectionStatus.accepted) {
+      syncCircleMembersToFirestore();
     }
     notifyListeners();
   }
@@ -456,8 +459,9 @@ class AppState extends ChangeNotifier {
     if (uid == null || uid.isEmpty) return;
 
     try {
+      final circleRoomId = getCircleRoomId();
       final key = await resolveSosSessionKey(
-        sessionKeyId: 'sos_safe_family_global_location_key',
+        sessionKeyId: circleRoomId,
       );
       await _locationShareService.publishLocation(
         uid: uid,
@@ -466,6 +470,8 @@ class AppState extends ChangeNotifier {
         isMocked: position.isMocked,
         battery: _batteryLevel,
         key: SecretKey(key),
+        senderEmail: _currentUserEmail ?? _userProfile?.email,
+        sessionKeyId: circleRoomId,
       );
     } catch (e) {
       debugPrint('[AppState] _publishMyCurrentLocation error: $e');
@@ -482,18 +488,22 @@ class AppState extends ChangeNotifier {
 
     final eventId = 'geo_${DateTime.now().millisecondsSinceEpoch}_${_uuid.v4().substring(0, 8)}';
     try {
+      final circleRoomId = getCircleRoomId();
       final key = await resolveSosSessionKey(
-        sessionKeyId: 'sos_safe_family_global_geofence_key',
+        sessionKeyId: circleRoomId,
       );
       await _locationShareService.publishGeofenceEvent(
         eventId: eventId,
         uid: uid,
+        senderUid: uid,
         senderName: _userProfile?.displayName ?? 'Tôi',
+        senderEmail: _currentUserEmail ?? _userProfile?.email,
         fenceName: transition.fence.name,
         action: transition.isEnter ? 'enter' : 'exit',
         lat: loc.latitude,
         lng: loc.longitude,
         key: SecretKey(key),
+        sessionKeyId: circleRoomId,
       );
     } catch (e) {
       debugPrint('[AppState] _broadcastGeofenceTransition error: $e');
@@ -524,9 +534,13 @@ class AppState extends ChangeNotifier {
           if (memberIndex == -1) continue;
 
           try {
+            final senderEmail = data['senderEmail'] as String? ?? data['email'] as String?;
+            final sessId = data['sessionKeyId'] as String? ??
+                getCircleRoomId(peerEmail: senderEmail, peerUid: docUid);
             final key = await resolveSosSessionKey(
               targetUid: docUid,
-              sessionKeyId: 'sos_safe_family_global_location_key',
+              senderEmail: senderEmail,
+              sessionKeyId: sessId,
             );
             final decrypted = await _locationShareService.decryptLocationDoc(
               docData: data,
@@ -560,13 +574,17 @@ class AppState extends ChangeNotifier {
           final data = doc.data();
           if (data == null) continue;
 
-          final senderUid = data['uid'] as String?;
+          final senderUid = data['senderUid'] as String? ?? data['uid'] as String?;
           if (senderUid == _currentUserUid) continue; // Bỏ qua sự kiện của chính mình
 
           try {
+            final senderEmail = data['senderEmail'] as String?;
+            final sessId = data['sessionKeyId'] as String? ??
+                getCircleRoomId(peerEmail: senderEmail, peerUid: senderUid);
             final key = await resolveSosSessionKey(
               targetUid: senderUid,
-              sessionKeyId: 'sos_safe_family_global_geofence_key',
+              senderEmail: senderEmail,
+              sessionKeyId: sessId,
             );
             final geoEvent = await _locationShareService.decryptGeofenceDoc(
               docData: data,
@@ -632,70 +650,71 @@ class AppState extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------
-  // SOS
+  // SOS & VÒNG TRÒN GIA ĐÌNH - THỐNG NHẤT KHÓA MÃ HÓA
   // ---------------------------------------------------------------------
 
-  /// Thỏa thuận hoặc dẫn xuất khóa phiên 32-byte dùng cho SOS:
-  /// - Ưu tiên E2EE ECDH X25519 với khóa bí mật trong Keystore nếu có peer
-  /// - Fallback demo key qua deriveRoomKey nếu chưa thiết lập peer key
-  Future<Uint8List> resolveSosSessionKey({
-    String? targetUid,
-    String? sessionKeyId,
-  }) async {
-    // 1. Nếu có peer UID và người dùng đã đăng nhập có Keystore
-    if (_currentUserUid != null) {
-      String? peerPubKeyB64;
-      try {
-        if (targetUid != null && targetUid.isNotEmpty && targetUid != 'me') {
-          final doc = await _firestore.collection('users').doc(targetUid).get();
-          if (doc.exists && doc.data() != null) {
-            peerPubKeyB64 = doc.data()!['publicKey'] as String?;
-          }
-        }
-        if (peerPubKeyB64 == null && _familyMembers.isNotEmpty) {
-          for (final member in _familyMembers) {
-            if (member.id.isNotEmpty) {
-              final doc = await _firestore.collection('users').doc(member.id).get();
-              if (doc.exists && doc.data() != null) {
-                final key = doc.data()!['publicKey'] as String?;
-                if (key != null && key.isNotEmpty) {
-                  peerPubKeyB64 = key;
-                  break;
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        debugPrint('[AppState] Tra cứu peer public key cho SOS: $e');
-      }
+  /// Tính toán định danh phòng vòng tròn gia đình (circleRoomId) thống nhất:
+  /// Tập hợp email (hoặc UID) của các thành viên trong vòng tròn gia đình,
+  /// sắp xếp theo thứ tự bảng chữ cái và ghép lại thành một ID duy nhất: `circle_<id1>___<id2>...`
+  /// Đảm bảo mọi thiết bị trong cùng vòng tròn đều tính toán ra CHÍNH XÁC cùng một circleRoomId.
+  String getCircleRoomId({
+    String? peerEmail,
+    String? peerUid,
+  }) {
+    final identities = <String>{};
 
-      if (peerPubKeyB64 != null && peerPubKeyB64.isNotEmpty) {
-        try {
-          final storage = SecureStorageService();
-          final myPrivB64 = await storage.getUserPrivateKey(_currentUserUid!);
-          final myPubB64 = _userProfile?.publicKeyB64 ?? await storage.getUserPublicKey(_currentUserUid!);
-          if (myPrivB64 != null && myPubB64 != null) {
-            final myKeyPair = await _crypto.importKeyPair(
-              privateKeyB64: myPrivB64,
-              publicKeyB64: myPubB64,
-            );
-            final e2eeKey = await _crypto.deriveChatKeyForPeer(
-              myKeyPair: myKeyPair,
-              theirPublicKeyB64: peerPubKeyB64,
-            );
-            debugPrint('[AppState] SOS sử dụng khóa E2EE ECDH X25519 với peer');
-            return e2eeKey;
-          }
-        } catch (e) {
-          debugPrint('[AppState] Lỗi thỏa thuận khóa E2EE cho SOS: $e');
-        }
+    final myEmail = _currentUserEmail ?? _userProfile?.email;
+    if (myEmail != null && myEmail.trim().isNotEmpty) {
+      identities.add(myEmail.trim().toLowerCase());
+    }
+
+    if (peerEmail != null && peerEmail.trim().isNotEmpty) {
+      identities.add(peerEmail.trim().toLowerCase());
+    }
+
+    for (final member in _familyMembers) {
+      if (member.email != null && member.email!.trim().isNotEmpty) {
+        identities.add(member.email!.trim().toLowerCase());
       }
     }
 
-    // 2. Fallback demo nếu chưa có peer key hoặc tài khoản demo
-    final fallbackId = sessionKeyId ?? 'sos_safe_family_global_demo_key';
-    return _crypto.deriveRoomKey(fallbackId);
+    // Nếu không đủ 2 email để tạo cặp vòng tròn:
+    if (identities.length < 2) {
+      // Thử dùng UID nếu có sẵn
+      if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null) {
+        final uids = [_currentUserUid!.toLowerCase(), peerUid.toLowerCase()]..sort();
+        return 'circle_${uids[0]}___${uids[1]}';
+      }
+      return 'sos_safe_family_global_demo_key';
+    }
+
+    final sorted = identities.toList()..sort();
+    final sanitized = sorted
+        .map((s) => s.replaceAll(RegExp(r'[^a-z0-9]'), '_'))
+        .join('___');
+    return 'circle_$sanitized';
+  }
+
+  /// Thỏa thuận hoặc dẫn xuất khóa phiên 32-byte dùng cho SOS, Vị trí và Geofence.
+  /// Thống nhất cùng một khóa đối xứng cho cả gửi và nhận dựa trên danh tính thành viên vòng tròn gia đình.
+  Future<Uint8List> resolveSosSessionKey({
+    String? targetUid,
+    String? targetEmail,
+    String? senderEmail,
+    String? sessionKeyId,
+  }) async {
+    // 1. Nếu sessionKeyId cụ thể đã được truyền và hợp lệ (từ gói tin sự kiện)
+    if (sessionKeyId != null && sessionKeyId.isNotEmpty) {
+      return _crypto.deriveRoomKey(sessionKeyId);
+    }
+
+    // 2. Thống nhất tạo khóa từ circleRoomId của vòng tròn gia đình
+    final circleId = getCircleRoomId(
+      peerEmail: targetEmail ?? senderEmail,
+      peerUid: targetUid,
+    );
+    debugPrint('[AppState] Sử dụng khóa vòng tròn đối xứng: $circleId');
+    return _crypto.deriveRoomKey(circleId);
   }
 
   /// Kích hoạt sự kiện SOS khẩn cấp.
@@ -718,8 +737,8 @@ class AppState extends ChangeNotifier {
       status: SosStatus.active,
     );
 
-    const sessionKeyId = 'sos_safe_family_global_demo_key';
-    final key = await resolveSosSessionKey(sessionKeyId: sessionKeyId);
+    final circleRoomId = getCircleRoomId();
+    final key = await resolveSosSessionKey(sessionKeyId: circleRoomId);
     final encrypted = await _sosService.encryptEvent(event: event, key: key);
 
     _activeSos = event;
@@ -742,11 +761,12 @@ class AppState extends ChangeNotifier {
         'encryptedEvent': encrypted.encryptedEvent,
         'encryptedLocation': encrypted.encryptedLocation,
         'senderUid': _currentUserUid ?? 'me',
+        'senderEmail': _currentUserEmail ?? _userProfile?.email ?? '',
         'senderName': senderName,
         'status': 'active',
         'createdAt': FieldValue.serverTimestamp(),
         'nonce': encrypted.nonceBase64,
-        'sessionKeyId': sessionKeyId,
+        'sessionKeyId': circleRoomId,
       });
 
       _isSosDelivered = true;
@@ -891,11 +911,14 @@ class AppState extends ChangeNotifier {
             if (_activeSos == null || _activeSos!.sosId != sosId) {
               final encEvent = data['encryptedEvent'] as String? ?? '';
               final encLoc = data['encryptedLocation'] as String? ?? '';
-              final sessId = data['sessionKeyId'] as String? ?? 'sos_safe_family_global_demo_key';
+              final senderEmail = data['senderEmail'] as String?;
+              final sessId = data['sessionKeyId'] as String? ??
+                  getCircleRoomId(peerEmail: senderEmail, peerUid: senderUid);
 
               if (encEvent.isNotEmpty && encLoc.isNotEmpty) {
                 final key = await resolveSosSessionKey(
                   targetUid: senderUid,
+                  senderEmail: senderEmail,
                   sessionKeyId: sessId,
                 );
                 await receiveIncomingSos(
@@ -1043,6 +1066,19 @@ class AppState extends ChangeNotifier {
 
     try {
       await _firestore.collection('invitations').doc(id).update({'status': 'accepted'});
+      final invDoc = await _firestore.collection('invitations').doc(id).get();
+      final data = invDoc.data();
+      final fromUid = data?['fromUid']?.toString();
+      final myUid = _currentUserUid;
+      if (myUid != null && myUid.isNotEmpty && fromUid != null && fromUid.isNotEmpty) {
+        await _firestore.collection('users').doc(myUid).set({
+          'members': FieldValue.arrayUnion([fromUid]),
+        }, SetOptions(merge: true));
+        await _firestore.collection('users').doc(fromUid).set({
+          'members': FieldValue.arrayUnion([myUid]),
+        }, SetOptions(merge: true));
+      }
+      syncCircleMembersToFirestore();
     } catch (e) {
       debugPrint('[AppState] acceptInvitation failed: $e');
     }
@@ -1192,6 +1228,21 @@ class AppState extends ChangeNotifier {
         email: partnerEmail,
         status: MemberConnectionStatus.accepted,
       );
+
+      final myUid = _currentUserUid;
+      if (myUid != null && myUid.isNotEmpty && fromUid != null && fromUid.isNotEmpty) {
+        try {
+          await _firestore.collection('users').doc(myUid).set({
+            'members': FieldValue.arrayUnion([fromUid]),
+          }, SetOptions(merge: true));
+          await _firestore.collection('users').doc(fromUid).set({
+            'members': FieldValue.arrayUnion([myUid]),
+          }, SetOptions(merge: true));
+        } catch (e) {
+          debugPrint('[AppState] connectWithPairingCode arrayUnion error: $e');
+        }
+      }
+      syncCircleMembersToFirestore();
       return true;
     } catch (e) {
       debugPrint('[AppState] connectWithPairingCode Firestore error: $e');
@@ -1199,8 +1250,52 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Đồng bộ danh sách UID các thành viên trong vòng tròn gia đình vào users/{uid}.members trên Firestore
+  Future<void> syncCircleMembersToFirestore() async {
+    final myUid = _currentUserUid;
+    if (myUid == null || myUid.isEmpty) return;
+
+    try {
+      final memberUids = <String>{};
+      for (final m in _familyMembers) {
+        if (m.status == MemberConnectionStatus.accepted) {
+          if (m.id.isNotEmpty && !m.id.contains('-')) {
+            memberUids.add(m.id);
+          }
+          if (m.email != null && m.email!.isNotEmpty) {
+            try {
+              final query = await _firestore
+                  .collection('users')
+                  .where('email', isEqualTo: m.email!.trim().toLowerCase())
+                  .limit(1)
+                  .get();
+              if (query.docs.isNotEmpty) {
+                final peerUid = query.docs.first.id;
+                memberUids.add(peerUid);
+                await _firestore.collection('users').doc(peerUid).set({
+                  'members': FieldValue.arrayUnion([myUid]),
+                }, SetOptions(merge: true));
+              }
+            } catch (e) {
+              debugPrint('[AppState] syncCircleMembers tra cứu email ${m.email} lỗi: $e');
+            }
+          }
+        }
+      }
+
+      if (memberUids.isNotEmpty) {
+        await _firestore.collection('users').doc(myUid).set({
+          'members': FieldValue.arrayUnion(memberUids.toList()),
+        }, SetOptions(merge: true));
+        debugPrint('[AppState] syncCircleMembersToFirestore hoàn tất: $memberUids');
+      }
+    } catch (e) {
+      debugPrint('[AppState] syncCircleMembersToFirestore error: $e');
+    }
+  }
+
   /// Xóa thành viên khỏi vòng tròn gia đình theo ID.
-  void removeFamilyMember(String id) {
+  Future<void> removeFamilyMember(String id) async {
     final int index = _familyMembers.indexWhere((m) => m.id == id);
     if (index != -1) {
       final member = _familyMembers[index];
@@ -1209,6 +1304,22 @@ class AppState extends ChangeNotifier {
       addAuditLog(
         '$hhmm - [GIA ĐÌNH] Đã ngắt kết nối thành viên "${member.name}" khỏi vòng tròn',
       );
+
+      final myUid = _currentUserUid;
+      if (myUid != null && myUid.isNotEmpty) {
+        try {
+          await _firestore.collection('users').doc(myUid).set({
+            'members': FieldValue.arrayRemove([id]),
+          }, SetOptions(merge: true));
+          if (!id.contains('-')) {
+            await _firestore.collection('users').doc(id).set({
+              'members': FieldValue.arrayRemove([myUid]),
+            }, SetOptions(merge: true));
+          }
+        } catch (e) {
+          debugPrint('[AppState] removeFamilyMember firestore error: $e');
+        }
+      }
       notifyListeners();
     }
   }

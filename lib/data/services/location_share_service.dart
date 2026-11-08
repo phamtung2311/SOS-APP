@@ -78,6 +78,8 @@ class LocationShareService {
     required bool isMocked,
     int? battery,
     required SecretKey key,
+    String? senderEmail,
+    String? sessionKeyId,
     bool force = false,
     DateTime? now,
   }) async {
@@ -101,6 +103,13 @@ class LocationShareService {
       };
       if (battery != null) {
         data['battery'] = battery;
+      }
+      if (senderEmail != null && senderEmail.isNotEmpty) {
+        data['senderEmail'] = senderEmail;
+        data['email'] = senderEmail;
+      }
+      if (sessionKeyId != null && sessionKeyId.isNotEmpty) {
+        data['sessionKeyId'] = sessionKeyId;
       }
       await _firestore.collection('locations').doc(uid).set(data);
       _lastPublishedTime = currentTime;
@@ -142,12 +151,15 @@ class LocationShareService {
   Future<void> publishGeofenceEvent({
     required String eventId,
     required String uid,
+    String? senderUid,
     required String senderName,
+    String? senderEmail,
     required String fenceName,
     required String action, // 'enter' | 'exit'
     required double lat,
     required double lng,
     required SecretKey key,
+    String? sessionKeyId,
   }) async {
     final encryptedEvent = await _crypto.encryptLocationPayload(
       lat: lat,
@@ -156,15 +168,23 @@ class LocationShareService {
     );
 
     try {
-      await _firestore.collection('geofence_events').doc(eventId).set({
+      final Map<String, dynamic> data = {
         'eventId': eventId,
         'uid': uid,
+        'senderUid': senderUid ?? uid,
         'senderName': senderName,
         'fenceName': fenceName,
         'action': action,
         'encryptedEvent': encryptedEvent,
         'createdAt': FieldValue.serverTimestamp(),
-      });
+      };
+      if (senderEmail != null && senderEmail.isNotEmpty) {
+        data['senderEmail'] = senderEmail;
+      }
+      if (sessionKeyId != null && sessionKeyId.isNotEmpty) {
+        data['sessionKeyId'] = sessionKeyId;
+      }
+      await _firestore.collection('geofence_events').doc(eventId).set(data);
     } catch (e) {
       debugPrint('[LocationShareService] publishGeofenceEvent failed: $e');
     }
