@@ -83,6 +83,98 @@ class _SOSFamilyAppState extends State<SOSFamilyApp> with WidgetsBindingObserver
   }
 }
 
+/// Hộp thoại nhập / đăng ký mã PIN dự phòng khi thiết bị không có cảm biến sinh trắc học.
+Future<bool> _showPinFallbackDialog(
+    BuildContext context, BiometricService biometricService) async {
+  final hasPin = await biometricService.hasRegisteredPin();
+  final pinController = TextEditingController();
+  String? errorMessage;
+
+  if (!context.mounted) return false;
+
+  final bool? success = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Bảo mật'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  hasPin
+                      ? 'Nhập mã PIN 6 chữ số để xác thực mở khoá vùng riêng tư:'
+                      : 'Thiết bị không hỗ trợ sinh trắc học. Vui lòng đăng ký mã PIN 6 chữ số để bảo vệ thông tin gia đình:',
+                  style: const TextStyle(fontSize: 14),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: pinController,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: InputDecoration(
+                    labelText: 'Mã PIN (6 chữ số)',
+                    errorText: errorMessage,
+                    border: const OutlineInputBorder(),
+                    counterText: '',
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Hủy'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  final pin = pinController.text.trim();
+                  if (pin.length != 6 || !RegExp(r'^\d{6}$').hasMatch(pin)) {
+                    setDialogState(() {
+                      errorMessage = 'Mã PIN phải đúng 6 chữ số';
+                    });
+                    return;
+                  }
+                  if (!hasPin) {
+                    try {
+                      await biometricService.registerPin(pin);
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop(true);
+                      }
+                    } catch (e) {
+                      setDialogState(() {
+                        errorMessage = 'Lỗi đăng ký PIN: $e';
+                      });
+                    }
+                  } else {
+                    final ok = await biometricService.verifyPin(pin);
+                    if (ok) {
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop(true);
+                      }
+                    } else {
+                      setDialogState(() {
+                        errorMessage = 'Mã PIN không đúng. Vui lòng thử lại';
+                      });
+                    }
+                  }
+                },
+                child: Text(hasPin ? 'Xác nhận' : 'Đăng ký PIN lần đầu'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+
+  return success ?? false;
+}
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -155,8 +247,23 @@ class _MainScreenState extends State<MainScreen> {
         localizedReason:
             'Xác thực vân tay/mật khẩu để mở vùng riêng tư gia đình',
       );
-      if (result != BiometricResult.success &&
-          result != BiometricResult.unavailable) {
+      if (result.name == 'unavailableNeedsPin') {
+        if (!mounted) return;
+        final ok =
+            await _showPinFallbackDialog(context, appState.biometricService);
+        if (!ok) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content:
+                    Text('Yêu cầu xác thực mã PIN để truy cập dữ liệu gia đình'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          return;
+        }
+      } else if (result != BiometricResult.success) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -717,8 +824,23 @@ class _MapScreenState extends State<MapScreen> {
                       localizedReason:
                           'Xác thực vân tay/mật khẩu để mở tin nhắn bảo mật E2EE',
                     );
-                    if (result != BiometricResult.success &&
-                        result != BiometricResult.unavailable) {
+                    if (result.name == 'unavailableNeedsPin') {
+                      if (!context.mounted) return;
+                      final ok = await _showPinFallbackDialog(
+                          context, appState.biometricService);
+                      if (!ok) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                  'Yêu cầu xác thực mã PIN để truy cập tin nhắn riêng tư'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                        return;
+                      }
+                    } else if (result != BiometricResult.success) {
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(

@@ -1,7 +1,9 @@
 import 'dart:io' show Platform;
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:sos_safe_family/data/services/crypto_service.dart';
 import 'package:sos_safe_family/data/services/secure_storage_service.dart';
 
 /// Kết quả của một lần xác thực sinh trắc học.
@@ -12,7 +14,10 @@ enum BiometricResult {
   /// Người dùng hủy (bấm Hủy / dùng back).
   cancelled,
 
-  /// Thiết bị không có sinh trắc học hoặc chưa đăng ký.
+  /// Thiết bị không có sinh trắc học hoặc chưa đăng ký, cần dùng mã PIN fallback.
+  unavailableNeedsPin,
+
+  /// Thiết bị gặp lỗi phần cứng tạm thời.
   unavailable,
 
   /// Lỗi khác (khóa tạm thời, quá nhiều lần thất bại, lỗi hệ thống...).
@@ -33,13 +38,16 @@ class BiometricService extends ChangeNotifier {
   BiometricService({
     LocalAuthentication? localAuthentication,
     SecureStorageService? secureStorage,
+    CryptoService? cryptoService,
   })  : _localAuth = localAuthentication ?? LocalAuthentication(),
-        _storage = secureStorage ?? SecureStorageService() {
+        _storage = secureStorage ?? SecureStorageService(),
+        _crypto = cryptoService ?? CryptoService() {
     _initPersistedSession();
   }
 
   final LocalAuthentication _localAuth;
   final SecureStorageService _storage;
+  final CryptoService _crypto;
 
   /// Thời gian tối đa duy trì trạng thái "đã mở khoá" (1 tuần = 7 ngày).
   static const Duration sessionTimeout = Duration(days: 7);
@@ -80,9 +88,6 @@ class BiometricService extends ChangeNotifier {
   DateTime? get lastAuthenticatedAt => _lastAuthenticatedAt;
 
   /// Thiết bị có hỗ trợ sinh trắc học (vân tay / khuôn mặt) hay không.
-  ///
-  /// Trả về `false` trên nền tảng không hỗ trợ (ví dụ widget test) để ứng dụng
-  /// không bị chặn vô ích.
   Future<bool> canAuthenticate() async {
     try {
       if (!kIsWeb && !(Platform.isAndroid || Platform.isIOS)) {
@@ -98,6 +103,72 @@ class BiometricService extends ChangeNotifier {
     }
   }
 
+  /// Kiểm tra xem người dùng đã đăng ký mã PIN fallback trong SecureStorage hay chưa.
+  Future<bool> hasRegisteredPin() async {
+    try {
+      final stored = await _storage.getPinHash();
+      return stored != null && stored.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Đăng ký mã PIN mới (yêu cầu đúng 6 chữ số).
+  ///
+  /// Sinh salt 16-byte từ Random.secure() và tính SHA-256(salt + pin) bằng CryptoService.
+  /// Lưu vào key `pin_hash_v1` trong SecureStorage.
+  Future<void> registerPin(String pin) async {
+    if (!RegExp(r'^\d{6}$').hasMatch(pin)) {
+      throw ArgumentError('Mã PIN phải gồm đúng 6 chữ số');
+    }
+    final rnd = Random.secure();
+    final saltBytes = Uint8List.fromList(List<int>.generate(16, (_) => rnd.nextInt(256)));
+    final saltHex = saltBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+    final hashObj = await _crypto.sha256Hash('$saltHex$pin');
+    final hashHex = hashObj.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+    await _storage.savePinHash('$saltHex:$hashHex');
+
+    final now = DateTime.now();
+    _unlockedThisSession = true;
+    _lastAuthenticatedAt = now;
+    try {
+      await _storage.saveLastBiometricAuthTime(now);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// Xác minh mã PIN đã đăng ký.
+  Future<bool> verifyPin(String pin) async {
+    if (!RegExp(r'^\d{6}$').hasMatch(pin)) {
+      return false;
+    }
+    final stored = await _storage.getPinHash();
+    if (stored == null || !stored.contains(':')) {
+      return false;
+    }
+    final parts = stored.split(':');
+    if (parts.length != 2) return false;
+    final saltHex = parts[0];
+    final expectedHashHex = parts[1];
+
+    final hashObj = await _crypto.sha256Hash('$saltHex$pin');
+    final calculatedHashHex = hashObj.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+    if (calculatedHashHex == expectedHashHex) {
+      final now = DateTime.now();
+      _unlockedThisSession = true;
+      _lastAuthenticatedAt = now;
+      try {
+        await _storage.saveLastBiometricAuthTime(now);
+      } catch (_) {}
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
   /// Xác thực sinh trắc học để truy cập vùng dữ liệu nhạy cảm.
   ///
   /// Nếu phiên đã được mở khoá ([isUnlockedThisSession]) thì trả về
@@ -111,9 +182,8 @@ class BiometricService extends ChangeNotifier {
     if (_unlockedThisSession) return BiometricResult.success;
 
     if (!await canAuthenticate()) {
-      // Không có sinh trắc học: cho phép qua (thiết bị có thể dùng PIN,
-      // và nguyên tắc "cứu hộ" quan trọng hơn việc chặn).
-      return BiometricResult.unavailable;
+      // Không có sinh trắc học → chuyển sang luồng mã PIN fallback
+      return BiometricResult.unavailableNeedsPin;
     }
 
     try {
@@ -141,7 +211,7 @@ class BiometricService extends ChangeNotifier {
         case LocalAuthExceptionCode.noBiometricHardware:
         case LocalAuthExceptionCode.noBiometricsEnrolled:
         case LocalAuthExceptionCode.noCredentialsSet:
-          return BiometricResult.unavailable;
+          return BiometricResult.unavailableNeedsPin;
         default:
           return BiometricResult.failed;
       }

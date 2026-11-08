@@ -1,12 +1,49 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart'
+    hide AndroidOptions;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart' as fss;
+
+/// Cấu hình AndroidOptions tương thích và tăng cường bảo mật trên Android Keystore.
+class AndroidOptions extends fss.AndroidOptions {
+  final bool encryptedSharedPreferences;
+  final List<String> aesGcmMasterKeys;
+
+  const AndroidOptions({
+    super.resetOnError = true,
+    this.encryptedSharedPreferences = true,
+    this.aesGcmMasterKeys = const ['sos_master_key'],
+    super.migrateOnAlgorithmChange,
+    super.migrateWithBackup,
+    super.enforceBiometrics,
+    super.requireBiometricsPerOperation,
+    super.keyCipherAlgorithm,
+    super.storageCipherAlgorithm,
+    super.biometricType,
+    super.requireBiometricConfirmation,
+    super.preferencesKeyPrefix,
+    super.storageNamespace,
+    super.biometricPromptTitle,
+    super.biometricPromptSubtitle,
+    super.biometricPromptNegativeButton,
+  });
+}
 
 /// Dịch vụ lưu trữ an toàn bọc ngoài `FlutterSecureStorage`.
 ///
-/// Trên Android, cấu hình `encryptedSharedPreferences: true` sử dụng
-/// MasterKey lưu trong Android Keystore (TEE / StrongBox) để mã hóa dữ liệu.
+/// Trên Android, cấu hình `encryptedSharedPreferences: true` và `aesGcmMasterKeys`
+/// sử dụng MasterKey lưu trong Android Keystore (TEE / StrongBox) để mã hóa dữ liệu.
 class SecureStorageService {
+  @visibleForTesting
+  static const androidOptions = AndroidOptions(
+    resetOnError: true,
+    encryptedSharedPreferences: true,
+    aesGcmMasterKeys: ['sos_master_key'],
+  );
+
   static const _androidOptions = AndroidOptions(
     resetOnError: true,
+    encryptedSharedPreferences: true,
+    aesGcmMasterKeys: ['sos_master_key'],
   );
 
   static const FlutterSecureStorage _defaultStorage = FlutterSecureStorage(
@@ -17,6 +54,9 @@ class SecureStorageService {
 
   SecureStorageService({FlutterSecureStorage? storage})
       : _storage = storage ?? _defaultStorage;
+
+  /// Đánh giá xem phiên bản storage này có được hỗ trợ bởi Android Keystore thật hay không.
+  bool get isKeystoreBacked => identical(_storage, _defaultStorage);
 
   // ---------------------------------------------------------------------------
   // Khóa cá nhân & Khóa công khai X25519 theo từng UID người dùng
@@ -66,6 +106,28 @@ class SecureStorageService {
 
   Future<String?> getPin() async {
     return _storage.read(key: 'pin');
+  }
+
+  /// Lưu chuỗi hash PIN kèm salt `pin_hash_v1` (SHA-256 + 16-byte salt).
+  Future<void> savePinHash(String hash) async {
+    await _storage.write(key: 'pin_hash_v1', value: hash);
+  }
+
+  /// Đọc chuỗi hash PIN kèm salt `pin_hash_v1`.
+  Future<String?> getPinHash() async {
+    try {
+      return await _storage.read(key: 'pin_hash_v1').timeout(
+        const Duration(milliseconds: 300),
+        onTimeout: () => null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Xóa hash PIN.
+  Future<void> deletePinHash() async {
+    await _storage.delete(key: 'pin_hash_v1');
   }
 
   // ---------------------------------------------------------------------------

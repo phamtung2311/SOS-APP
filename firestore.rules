@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // 1. Collection `users/{uid}`:
+    // Read: Mọi user đã xác thực (để tìm kiếm thành viên và trao đổi Public Key X25519 cho E2EE).
+    // Write: Chỉ chính chủ được ghi vào profile của mình.
+    match /users/{uid} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // 2. Collection `chats/{chatId}`:
+    // Read/Write: Chỉ 2 thành viên có UID nằm trong danh sách `members`.
+    match /chats/{chatId} {
+      allow create: if isAuthenticated() && 
+        (request.resource.data.members is list && request.auth.uid in request.resource.data.members);
+      allow read, update, delete: if isAuthenticated() && 
+        (request.auth.uid in resource.data.members);
+
+      // Collection con `messages/{msgId}`: Kế thừa quyền từ phòng chat cha
+      match /messages/{msgId} {
+        allow read, write: if isAuthenticated() && 
+          (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members);
+      }
+    }
+
+    // 3. Collection `invitations/{id}`:
+    // Create: Chỉ người gửi tự tạo lời mời của mình (senderUid == request.auth.uid).
+    // Read: Chỉ người gửi và người nhận được phép đọc.
+    // Update status: Chỉ người nhận (recipientUid) được chấp nhận / từ chối lời mời.
+    // Delete: Chỉ người gửi được phép thu hồi / xóa lời mời.
+    match /invitations/{id} {
+      allow create: if isAuthenticated() && request.resource.data.senderUid == request.auth.uid;
+      allow read: if isAuthenticated() && 
+        (resource.data.senderUid == request.auth.uid || resource.data.recipientUid == request.auth.uid);
+      allow update: if isAuthenticated() && 
+        resource.data.recipientUid == request.auth.uid;
+      allow delete: if isAuthenticated() && 
+        resource.data.senderUid == request.auth.uid;
+    }
+
+    // 4. Collection `locations/{uid}`:
+    // Write: Chỉ chính chủ cập nhật tọa độ GPS mã hóa của mình.
+    // Read: Chính chủ hoặc các thành viên nằm trong danh sách vòng tròn gia đình của reader.
+    match /locations/{uid} {
+      allow write: if isAuthenticated() && request.auth.uid == uid;
+      allow read: if isAuthenticated() && (
+        request.auth.uid == uid ||
+        uid in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.members ||
+        request.auth.uid in get(/databases/$(database)/documents/users/$(uid)).data.members
+      );
+    }
+
+    // 5. Collection `sos_events/{id}` & `geofence_events/{id}`:
+    // Write: Chỉ chính chủ tạo hoặc hủy cảnh báo SOS / sự kiện Geofence của bản thân.
+    // Read: Chính chủ hoặc các thành viên thuộc vòng tròn gia đình của người gửi.
+    match /sos_events/{id} {
+      allow create: if isAuthenticated() && 
+        (request.resource.data.userId == request.auth.uid || request.resource.data.senderId == request.auth.uid);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.userId == request.auth.uid || resource.data.senderId == request.auth.uid);
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        resource.data.senderId == request.auth.uid ||
+        request.auth.uid in get(/databases/$(database)/documents/users/$(resource.data.userId)).data.members
+      );
+    }
+
+    match /geofence_events/{id} {
+      allow create: if isAuthenticated() && 
+        (request.resource.data.userId == request.auth.uid || request.resource.data.senderId == request.auth.uid);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.userId == request.auth.uid || resource.data.senderId == request.auth.uid);
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        resource.data.senderId == request.auth.uid ||
+        request.auth.uid in get(/databases/$(database)/documents/users/$(resource.data.userId)).data.members
+      );
+    }
+  }
+}

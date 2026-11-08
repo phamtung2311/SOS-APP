@@ -165,6 +165,28 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       debugPrint('[FamilyChatScreen] ⚠️ Thiếu peer key -> Fallback deriveRoomKey (demo)');
     }
 
+    // Cập nhật trường members cho doc chats/{chatId} phục vụ Firestore Security Rules
+    try {
+      final membersList = <String>[];
+      if (_myUid != null && _myUid!.isNotEmpty) membersList.add(_myUid!);
+      if (widget.memberId != null &&
+          widget.memberId!.isNotEmpty &&
+          !membersList.contains(widget.memberId)) {
+        membersList.add(widget.memberId!);
+      }
+      if (membersList.isNotEmpty) {
+        await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(_chatId)
+            .set({
+          'members': membersList,
+          'lastActivity': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Cập nhật doc chats members skipped: $e');
+    }
+
     if (!mounted) return;
     setState(() {
       _sharedKey = keyBytes;

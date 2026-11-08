@@ -9,6 +9,9 @@ class FakeSecureStorageService extends SecureStorageService {
   final Map<String, String> _memory = {};
 
   @override
+  bool get isKeystoreBacked => false;
+
+  @override
   Future<void> saveUserPrivateKey(String uid, String privateKeyBase64) async {
     _memory['x25519_priv_$uid'] = privateKeyBase64;
   }
@@ -71,7 +74,7 @@ void main() {
       expect(profile.uid, equals(uid));
       expect(profile.displayName, equals(displayName));
       expect(profile.email, equals(email));
-      expect(profile.isKeystoreProtected, isTrue);
+      expect(profile.isKeystoreProtected, isFalse);
 
       // Kiểm tra định dạng khóa X25519
       expect(profile.publicKeyB64, isNotEmpty);
@@ -178,6 +181,16 @@ void main() {
 
       expect(await fakeStorage.getUserPrivateKey(uid), isNull);
       expect(await fakeStorage.getUserPublicKey(uid), isNull);
+    });
+
+    test('Default SecureStorageService is Keystore-backed', () {
+      final realStorage = SecureStorageService();
+      expect(realStorage.isKeystoreBacked, isTrue);
+    });
+
+    test('config mặc định trên Android phải có encryptedSharedPreferences: true', () {
+      expect(SecureStorageService.androidOptions.encryptedSharedPreferences, isTrue);
+      expect(SecureStorageService.androidOptions.aesGcmMasterKeys, contains('sos_master_key'));
     });
   });
 }

@@ -207,7 +207,7 @@ class AuthService {
       photoUrl: photoUrl,
       publicKeyB64: publicKeyB64,
       publicKeyFingerprint: fingerprint,
-      isKeystoreProtected: true,
+      isKeystoreProtected: _storage.isKeystoreBacked,
     );
 
     _currentProfile = profile;
