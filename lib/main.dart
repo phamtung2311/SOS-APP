@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
@@ -39,9 +40,9 @@ class _SOSFamilyAppState extends State<SOSFamilyApp> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Kích hoạt cờ chống chụp màn hình nếu được cấu hình mặc định
+    // Kích hoạt cờ chống chụp màn hình nếu được cấu hình mặc định (bật trên Release mode để bảo vệ dữ liệu, cho phép chụp ảnh kiểm thử trên Debug mode)
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_state.flagSecureEnabled) {
+      if (kReleaseMode && _state.flagSecureEnabled) {
         _state.setFlagSecure(true);
       }
       _state.initForegroundTask();
@@ -1585,26 +1586,39 @@ class _CircleScreenState extends State<CircleScreen> {
                     width: double.infinity,
                     height: 50,
                     child: ElevatedButton.icon(
-                      onPressed: () {
+                      onPressed: () async {
                         if (formKey.currentState?.validate() ?? false) {
-                          appState.sendInvitation(
+                          final email = emailController.text.trim();
+                          final error = await appState.sendInvitation(
                             name: nameController.text.trim(),
                             relation: selectedRelation,
-                            email: emailController.text.trim().isEmpty
-                                ? null
-                                : emailController.text.trim(),
+                            email: email.isEmpty ? null : email,
                             color: selectedColor,
                           );
-                          Navigator.pop(bottomSheetContext);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                '📨 Đã gửi lời mời tới "${nameController.text.trim()}". Đang chờ đối phương chấp thuận ủy quyền vị trí!',
-                              ),
-                              backgroundColor: const Color(0xFFE65100),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
+                          if (error != null) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('⚠️ $error'),
+                                  backgroundColor: const Color(0xFFD32F2F),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          } else {
+                            if (context.mounted) {
+                              Navigator.pop(bottomSheetContext);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    '📨 Đã gửi lời mời tới "${nameController.text.trim()}". Đang chờ đối phương chấp thuận ủy quyền vị trí!',
+                                  ),
+                                  backgroundColor: const Color(0xFFE65100),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          }
                         }
                       },
                       icon: const Icon(Icons.send_rounded),

@@ -57,6 +57,10 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
   bool _isInspectorEnabled = true;
   bool _isSending = false;
 
+  String _peerDisplayName = '';
+  String? _peerEmail;
+  bool _isDemoFallbackRoom = false;
+
   @override
   void initState() {
     super.initState();
@@ -90,21 +94,43 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       _myName = user?.displayName ?? 'Tôi';
     } catch (_) {}
 
-    final myE = (_myEmail ?? 'user_a').trim().toLowerCase();
-    final peerE = (widget.peerEmail ?? widget.memberName).trim().toLowerCase();
-    final sorted = [myE, peerE]..sort();
-    _chatId = 'chat_${sorted[0].replaceAll(RegExp(r'[^a-z0-9]'), '_')}___${sorted[1].replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+    final peerUid = widget.memberId;
+    if (_myUid != null && _myUid!.isNotEmpty && peerUid != null && peerUid.isNotEmpty && !peerUid.contains('-')) {
+      final sortedUids = [_myUid!, peerUid]..sort();
+      _chatId = 'chat_${sortedUids[0]}_${sortedUids[1]}';
+      _isDemoFallbackRoom = false;
+    } else {
+      // Fallback email-based CHỈ khi 1 bên chưa login — giữ làm demo mode, có nhãn
+      final myE = (_myEmail ?? 'user_a').trim().toLowerCase();
+      final peerE = (widget.peerEmail ?? widget.memberName).trim().toLowerCase();
+      final sorted = [myE, peerE]..sort();
+      _chatId = 'chat_${sorted[0].replaceAll(RegExp(r'[^a-z0-9]'), '_')}___${sorted[1].replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+      _isDemoFallbackRoom = true;
+    }
+
+    _peerDisplayName = widget.memberName;
+    _peerEmail = widget.peerEmail;
 
     // 1. Thử truy vấn Public Key của peer từ Cloud Firestore
     String? peerPublicKeyB64;
     try {
+      // Thứ tự tra: (1) users/{member.id} (đã là uid thật) -> (2) where('email') chỉ khi demo chưa có uid
       if (widget.memberId != null && widget.memberId!.isNotEmpty) {
         final doc = await FirebaseFirestore.instance
             .collection('users')
             .doc(widget.memberId)
             .get();
         if (doc.exists && doc.data() != null) {
-          peerPublicKeyB64 = doc.data()!['publicKey'] as String?;
+          final data = doc.data()!;
+          peerPublicKeyB64 = data['publicKey'] as String?;
+          final dbName = data['displayName'] as String?;
+          if (dbName != null && dbName.isNotEmpty) {
+            _peerDisplayName = dbName;
+          }
+          final dbEmail = data['email'] as String?;
+          if (dbEmail != null && dbEmail.isNotEmpty) {
+            _peerEmail = dbEmail;
+          }
         }
       }
 
@@ -115,20 +141,19 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
             .limit(1)
             .get();
         if (query.docs.isNotEmpty) {
-          peerPublicKeyB64 = query.docs.first.data()['publicKey'] as String?;
+          final data = query.docs.first.data();
+          peerPublicKeyB64 = data['publicKey'] as String?;
+          final dbName = data['displayName'] as String?;
+          if (dbName != null && dbName.isNotEmpty) {
+            _peerDisplayName = dbName;
+          }
+          final dbEmail = data['email'] as String?;
+          if (dbEmail != null && dbEmail.isNotEmpty) {
+            _peerEmail = dbEmail;
+          }
         }
       }
-
-      if (peerPublicKeyB64 == null && widget.memberName.isNotEmpty) {
-        final query = await FirebaseFirestore.instance
-            .collection('users')
-            .where('displayName', isEqualTo: widget.memberName.trim())
-            .limit(1)
-            .get();
-        if (query.docs.isNotEmpty) {
-          peerPublicKeyB64 = query.docs.first.data()['publicKey'] as String?;
-        }
-      }
+      // Tuyệt đối KHÔNG tra cứu theo displayName vì gây xung đột khi trùng tên
     } catch (e) {
       debugPrint('[FamilyChatScreen] Lỗi truy vấn Firestore lấy peer key: $e');
     }
@@ -584,7 +609,11 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                   backgroundColor: const Color(0xFF7E57C2),
                   foregroundColor: Colors.white,
                   child: Text(
-                    widget.memberName.substring(0, 1).toUpperCase(),
+                    (_peerDisplayName.isNotEmpty ? _peerDisplayName : widget.memberName)
+                        .characters
+                        .firstOrNull
+                        ?.toUpperCase() ??
+                        '?',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -610,28 +639,38 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
-                    widget.memberName,
+                    _peerDisplayName.isNotEmpty ? _peerDisplayName : widget.memberName,
                     style: const TextStyle(
                       fontWeight: FontWeight.w700,
-                      fontSize: 17,
+                      fontSize: 16,
                       color: Color(0xFF18191F),
                     ),
                   ),
+                  if (_peerEmail != null && _peerEmail!.isNotEmpty)
+                    Text(
+                      _peerEmail!,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF757575),
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
                   Row(
                     children: [
                       Icon(
                         _isE2EE ? Icons.lock_rounded : Icons.lock_open_rounded,
-                        size: 12,
+                        size: 11,
                         color: _isE2EE ? const Color(0xFF43A047) : const Color(0xFFE65100),
                       ),
                       const SizedBox(width: 4),
                       Text(
                         _isE2EE
                             ? 'E2EE: ECDH X25519 / AES-256-GCM'
-                            : 'Chưa thiết lập khóa E2EE – chế độ demo',
+                            : (_isDemoFallbackRoom ? 'DEMO: Khóa fallback (room)' : 'DEMO: Khóa dẫn xuất'),
                         style: TextStyle(
-                          fontSize: 11.5,
-                          color: _isE2EE ? const Color(0xFF43A047) : const Color(0xFFE65100),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: _isE2EE ? const Color(0xFF2E7D32) : const Color(0xFFE65100),
                         ),
                       ),
                     ],

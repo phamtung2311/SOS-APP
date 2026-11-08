@@ -72,26 +72,28 @@ void main() {
         displayName: 'Phạm Nguyên Vũ',
       );
 
-      // Kết nối hai máy vào cùng vòng tròn gia đình
+      // Kết nối hai máy vào cùng vòng tròn gia đình bằng UID thật
       aliceState.addFamilyMember(
         name: 'Phạm Nguyên Vũ',
         relation: 'Người thân',
         email: 'vu.ct070165@kma.edu.vn',
+        uid: bobState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
       bobState.addFamilyMember(
         name: 'Phạm Văn Tùng',
         relation: 'Người thân',
         email: 'tung.ct070161@kma.edu.vn',
+        uid: aliceState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
 
       final circleA = aliceState.getCircleRoomId();
       final circleB = bobState.getCircleRoomId();
 
-      // Xác minh ID phòng thống nhất dựa trên sort alphabet email và sanitize
+      // Xác minh ID phòng thống nhất dựa trên sort alphabet UID
       expect(circleA, equals(circleB));
-      expect(circleA, equals('circle_tung_ct070161_kma_edu_vn___vu_ct070165_kma_edu_vn'));
+      expect(circleA, equals('circle_test_uid_tung_ct070161_kma_edu_vn___test_uid_vu_ct070165_kma_edu_vn'));
 
       // Xác minh hai máy dẫn xuất cùng một khóa đối xứng AES-256
       final keyA = await aliceState.resolveSosSessionKey();
@@ -117,12 +119,14 @@ void main() {
         name: 'Phạm Nguyên Vũ',
         relation: 'Người thân',
         email: 'vu.ct070165@kma.edu.vn',
+        uid: bobState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
       bobState.addFamilyMember(
         name: 'Phạm Văn Tùng',
         relation: 'Người thân',
         email: 'tung.ct070161@kma.edu.vn',
+        uid: aliceState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
 
@@ -196,12 +200,14 @@ void main() {
         name: 'Phạm Nguyên Vũ',
         relation: 'Người thân',
         email: 'vu.ct070165@kma.edu.vn',
+        uid: bobState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
       bobState.addFamilyMember(
         name: 'Phạm Văn Tùng',
         relation: 'Người thân',
         email: 'tung.ct070161@kma.edu.vn',
+        uid: aliceState.currentUserUid,
         status: MemberConnectionStatus.accepted,
       );
 

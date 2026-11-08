@@ -17,6 +17,7 @@ import 'package:sos_safe_family/data/services/geofence_service.dart';
 import 'package:sos_safe_family/data/services/location_share_service.dart';
 import 'package:sos_safe_family/data/services/push_service.dart';
 import 'package:sos_safe_family/data/services/replay_guard.dart';
+import 'package:sos_safe_family/data/services/secure_storage_service.dart';
 import 'package:sos_safe_family/data/services/sos_service.dart';
 import 'package:sos_safe_family/data/services/tamper_detector.dart';
 import 'package:uuid/uuid.dart';
@@ -252,7 +253,18 @@ class AppState extends ChangeNotifier {
     }
 
     final hasIncoming = _normalizeEmail(data['toEmail'] as String?) == _currentUserEmail;
-    final hasOutgoing = (data['fromUid'] ?? '').toString() == _currentUserUid;
+    final hasOutgoing = (data['fromUid'] ?? data['senderUid'] ?? '').toString() == _currentUserUid;
+
+    // Định danh peerUid: Đối phương là người gửi (incoming) hoặc người nhận (outgoing)
+    String peerUid = '';
+    if (hasIncoming) {
+      peerUid = (data['fromUid'] ?? data['senderUid'] ?? '').toString();
+    } else {
+      peerUid = (data['toUid'] ?? data['recipientUid'] ?? '').toString();
+    }
+    if (peerUid.isEmpty) {
+      peerUid = id;
+    }
 
     final resolvedStatus = switch (statusValue) {
       'accepted' => MemberConnectionStatus.accepted,
@@ -264,14 +276,15 @@ class AppState extends ChangeNotifier {
 
     final name = (data['fromName'] ?? data['name'] ?? 'Người thân').toString();
     final relation = (data['relation'] ?? 'Người thân').toString();
-    final email = (data['fromEmail'] ?? data['email'])?.toString();
+    final email = (hasIncoming ? data['fromEmail'] : data['toEmail'])?.toString() ?? data['email']?.toString();
     final colorValue = data['avatarColor'];
     final memberColor = colorValue is int
         ? Color(colorValue)
         : memberPalette[_familyMembers.length % memberPalette.length];
 
+    // Gán FamilyMemberItem.id = peerUid (UID của đối phương)
     final member = FamilyMemberItem(
-      id: id,
+      id: peerUid,
       name: name.trim().isEmpty ? 'Người thân' : name.trim(),
       relation: relation.trim().isEmpty ? 'Người thân' : relation.trim(),
       avatarColor: memberColor,
@@ -283,7 +296,7 @@ class AppState extends ChangeNotifier {
       status: resolvedStatus,
     );
 
-    final index = _familyMembers.indexWhere((m) => m.id == id);
+    final index = _familyMembers.indexWhere((m) => m.id == peerUid || (email != null && m.email == email) || m.id == id);
     if (index == -1) {
       _familyMembers.add(member);
     } else {
@@ -654,66 +667,124 @@ class AppState extends ChangeNotifier {
   // ---------------------------------------------------------------------
 
   /// Tính toán định danh phòng vòng tròn gia đình (circleRoomId) thống nhất:
-  /// Tập hợp email (hoặc UID) của các thành viên trong vòng tròn gia đình,
-  /// sắp xếp theo thứ tự bảng chữ cái và ghép lại thành một ID duy nhất: `circle_<id1>___<id2>...`
-  /// Đảm bảo mọi thiết bị trong cùng vòng tròn đều tính toán ra CHÍNH XÁC cùng một circleRoomId.
+  /// - Nếu có peerUid: sắp xếp UID [myUid, peerUid] -> `circle_uid1___uid2`
+  /// - Nếu trong vòng tròn có thành viên có UID: sắp xếp UID các thành viên -> `circle_uid1___uid2...`
+  /// - Fallback: sắp xếp Email các thành viên -> `circle_email1___email2...`
+  /// - Nếu chỉ có 1 mình (chưa kết nối ai): trả về `sos_safe_family_global_demo_key`
   String getCircleRoomId({
     String? peerEmail,
     String? peerUid,
   }) {
-    final identities = <String>{};
+    final hasPeer = (peerUid != null && peerUid.isNotEmpty) ||
+        (peerEmail != null && peerEmail.isNotEmpty) ||
+        _familyMembers.any((m) => m.id != _currentUserUid);
 
-    final myEmail = _currentUserEmail ?? _userProfile?.email;
-    if (myEmail != null && myEmail.trim().isNotEmpty) {
-      identities.add(myEmail.trim().toLowerCase());
-    }
-
-    if (peerEmail != null && peerEmail.trim().isNotEmpty) {
-      identities.add(peerEmail.trim().toLowerCase());
-    }
-
-    for (final member in _familyMembers) {
-      if (member.email != null && member.email!.trim().isNotEmpty) {
-        identities.add(member.email!.trim().toLowerCase());
-      }
-    }
-
-    // Nếu không đủ 2 email để tạo cặp vòng tròn:
-    if (identities.length < 2) {
-      // Thử dùng UID nếu có sẵn
-      if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null) {
-        final uids = [_currentUserUid!.toLowerCase(), peerUid.toLowerCase()]..sort();
-        return 'circle_${uids[0]}___${uids[1]}';
-      }
+    if (!hasPeer) {
       return 'sos_safe_family_global_demo_key';
     }
 
-    final sorted = identities.toList()..sort();
-    final sanitized = sorted
-        .map((s) => s.replaceAll(RegExp(r'[^a-z0-9]'), '_'))
-        .join('___');
-    return 'circle_$sanitized';
+    // 1. Ưu tiên cặp UID nếu có peerUid trực tiếp
+    if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null && _currentUserUid!.isNotEmpty) {
+      final uids = [_currentUserUid!.toLowerCase(), peerUid.toLowerCase()]..sort();
+      return 'circle_${uids[0]}___${uids[1]}';
+    }
+
+    // 2. Gom UID của toàn bộ các thành viên trong vòng tròn
+    final memberUids = <String>{};
+    if (_currentUserUid != null && _currentUserUid!.isNotEmpty) {
+      memberUids.add(_currentUserUid!.toLowerCase());
+    }
+    for (final m in _familyMembers) {
+      if (m.id.isNotEmpty && !m.id.contains('-')) {
+        memberUids.add(m.id.toLowerCase());
+      }
+    }
+    if (memberUids.length >= 2) {
+      final sortedUids = memberUids.toList()..sort();
+      return 'circle_${sortedUids.join('___')}';
+    }
+
+    // 3. Fallback theo Email
+    final emails = <String>{};
+    final myEmail = _currentUserEmail ?? _userProfile?.email;
+    if (myEmail != null && myEmail.trim().isNotEmpty) {
+      emails.add(myEmail.trim().toLowerCase());
+    }
+    if (peerEmail != null && peerEmail.trim().isNotEmpty) {
+      emails.add(peerEmail.trim().toLowerCase());
+    }
+    for (final m in _familyMembers) {
+      if (m.email != null && m.email!.trim().isNotEmpty) {
+        emails.add(m.email!.trim().toLowerCase());
+      }
+    }
+    if (emails.length >= 2) {
+      final sortedEmails = emails.toList()..sort();
+      final sanitized = sortedEmails.map((e) => e.replaceAll(RegExp(r'[^a-z0-9]'), '_')).join('___');
+      return 'circle_$sanitized';
+    }
+
+    return 'sos_safe_family_global_demo_key';
   }
 
   /// Thỏa thuận hoặc dẫn xuất khóa phiên 32-byte dùng cho SOS, Vị trí và Geofence.
-  /// Thống nhất cùng một khóa đối xứng cho cả gửi và nhận dựa trên danh tính thành viên vòng tròn gia đình.
+  /// Thống nhất cùng một khóa đối xứng cho cả gửi và nhận:
+  /// - Nếu cả hai đều có Public Key X25519: Thỏa thuận E2EE ECDH X25519 với khóa bí mật trong Keystore.
+  /// - Nếu thiếu key hoặc test offline: Cả hai cùng fallback deriveRoomKey(circleRoomId).
   Future<Uint8List> resolveSosSessionKey({
     String? targetUid,
     String? targetEmail,
     String? senderEmail,
     String? sessionKeyId,
   }) async {
-    // 1. Nếu sessionKeyId cụ thể đã được truyền và hợp lệ (từ gói tin sự kiện)
+    // 1. Xác định peerUid: ưu tiên targetUid truyền vào, hoặc lấy peer UID duy nhất trong vòng tròn
+    String? peerUid = targetUid;
+    if (peerUid == null || peerUid.isEmpty) {
+      for (final m in _familyMembers) {
+        if (m.status == MemberConnectionStatus.accepted && m.id.isNotEmpty && !m.id.contains('-')) {
+          peerUid = m.id;
+          break;
+        }
+      }
+    }
+
+    // 2. Thử thỏa thuận E2EE ECDH X25519 nếu có peerUid và myUid
+    if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null && _currentUserUid!.isNotEmpty) {
+      try {
+        final peerDoc = await _firestore.collection('users').doc(peerUid).get();
+        final peerPubKeyB64 = peerDoc.data()?['publicKey'] as String?;
+        if (peerPubKeyB64 != null && peerPubKeyB64.isNotEmpty) {
+          final storage = SecureStorageService();
+          final myPrivB64 = await storage.getUserPrivateKey(_currentUserUid!);
+          final myPubB64 = _userProfile?.publicKeyB64 ?? await storage.getUserPublicKey(_currentUserUid!);
+          if (myPrivB64 != null && myPubB64 != null) {
+            final myKeyPair = await _crypto.importKeyPair(
+              privateKeyB64: myPrivB64,
+              publicKeyB64: myPubB64,
+            );
+            final e2eeKey = await _crypto.deriveChatKeyForPeer(
+              myKeyPair: myKeyPair,
+              theirPublicKeyB64: peerPubKeyB64,
+            );
+            debugPrint('[AppState] ✅ SOS/Vị trí sử dụng khóa E2EE ECDH X25519 với peer: $peerUid');
+            return e2eeKey;
+          }
+        }
+      } catch (e) {
+        debugPrint('[AppState] Lỗi thỏa thuận ECDH X25519 cho SOS/Vị trí: $e');
+      }
+    }
+
+    // 3. Cả hai cùng fallback về deriveRoomKey(circleRoomId)
     if (sessionKeyId != null && sessionKeyId.isNotEmpty) {
       return _crypto.deriveRoomKey(sessionKeyId);
     }
 
-    // 2. Thống nhất tạo khóa từ circleRoomId của vòng tròn gia đình
     final circleId = getCircleRoomId(
       peerEmail: targetEmail ?? senderEmail,
-      peerUid: targetUid,
+      peerUid: peerUid,
     );
-    debugPrint('[AppState] Sử dụng khóa vòng tròn đối xứng: $circleId');
+    debugPrint('[AppState] ⚠️ Fallback sử dụng khóa vòng tròn đối xứng: $circleId');
     return _crypto.deriveRoomKey(circleId);
   }
 
@@ -737,8 +808,20 @@ class AppState extends ChangeNotifier {
       status: SosStatus.active,
     );
 
-    final circleRoomId = getCircleRoomId();
-    final key = await resolveSosSessionKey(sessionKeyId: circleRoomId);
+    // Xác định peerUid trong vòng tròn gia đình (nếu có)
+    String? peerUid;
+    for (final m in _familyMembers) {
+      if (m.status == MemberConnectionStatus.accepted && m.id.isNotEmpty && !m.id.contains('-')) {
+        peerUid = m.id;
+        break;
+      }
+    }
+
+    final circleRoomId = getCircleRoomId(peerUid: peerUid);
+    final key = await resolveSosSessionKey(
+      targetUid: peerUid,
+      sessionKeyId: circleRoomId,
+    );
     final encrypted = await _sosService.encryptEvent(event: event, key: key);
 
     _activeSos = event;
@@ -963,22 +1046,63 @@ class AppState extends ChangeNotifier {
   /// Theo nguyên lý An toàn thông tin và Bảo vệ dữ liệu nhạy cảm (PII),
   /// vị trí của đối phương KHÔNG ĐƯỢC hiển thị cho đến khi đối phương
   /// chấp thuận ủy quyền chia sẻ vị trí.
-  Future<void> sendInvitation({
+  Future<String?> sendInvitation({
     required String name,
     required String relation,
     Color? color,
     LatLng? location,
     String? email,
+    String? uid,
   }) async {
     final int count = _familyMembers.length;
     final Color memberColor =
         color ?? memberPalette[count % memberPalette.length];
     final String normalizedEmail = _normalizeEmail(email);
-    final String invitationId = _uuid.v4();
 
+    final currentUser = _userProfile ?? _auth.currentProfile;
+    String? peerUid = uid;
+    String? peerDisplayName;
+
+    if (normalizedEmail.isNotEmpty) {
+      if (normalizedEmail == _currentUserEmail) {
+        return 'Không thể tự kết nối với chính mình';
+      }
+
+      // Tra cứu users collection bằng email để lấy peerUid thật
+      try {
+        final query = await _firestore
+            .collection('users')
+            .where('email', isEqualTo: normalizedEmail)
+            .limit(1)
+            .get();
+
+        if (query.docs.isEmpty) {
+          final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+          addAuditLog('$hhmm - [KẾT NỐI THẤT BẠI] Tài khoản "$normalizedEmail" chưa đăng ký app');
+          notifyListeners();
+          return 'Tài khoản chưa đăng ký app';
+        }
+
+        final doc = query.docs.first;
+        peerUid = doc.id;
+        peerDisplayName = doc.data()['displayName'] as String?;
+      } catch (e) {
+        debugPrint('[AppState] Tra cứu user theo email: $e');
+        // Nếu Firestore offline (môi trường test), tạo mock peerUid từ email
+        peerUid ??= 'mock_uid_${normalizedEmail.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_')}';
+      }
+    } else {
+      peerUid ??= _uuid.v4();
+    }
+
+    final resolvedName = (peerDisplayName != null && peerDisplayName.isNotEmpty)
+        ? peerDisplayName
+        : (name.trim().isEmpty ? 'Người thân' : name.trim());
+
+    // Gán FamilyMemberItem.id = peerUid (UID thật của đối phương)
     final member = FamilyMemberItem(
-      id: invitationId,
-      name: name.trim(),
+      id: peerUid,
+      name: resolvedName,
       relation: relation.trim(),
       avatarColor: memberColor,
       isSharing: true,
@@ -989,36 +1113,43 @@ class AppState extends ChangeNotifier {
       status: MemberConnectionStatus.pendingOutgoing,
     );
 
-    final currentUser = _userProfile ?? _auth.currentProfile;
-    if (currentUser != null) {
-      final payload = <String, dynamic>{
-        'fromUid': currentUser.uid,
-        'fromName': currentUser.displayName,
-        'fromEmail': _normalizeEmail(currentUser.email),
-        'toEmail': normalizedEmail,
-        'relation': relation.trim(),
-        'avatarColor': memberColor.toARGB32(),
-        'status': 'pending',
-        'createdAt': FieldValue.serverTimestamp(),
-      };
-      final docRef = _firestore.collection('invitations').doc();
-      await docRef.set(payload);
-      final syncedMember = member.copyWith(id: docRef.id);
-      final existing = _familyMembers.indexWhere((element) => element.id == invitationId);
-      if (existing == -1) {
-        _familyMembers.add(syncedMember);
-      } else {
-        _familyMembers[existing] = syncedMember;
+    if (currentUser != null && normalizedEmail.isNotEmpty) {
+      try {
+        final payload = <String, dynamic>{
+          'fromUid': currentUser.uid,
+          'fromName': currentUser.displayName,
+          'fromEmail': _normalizeEmail(currentUser.email),
+          'senderUid': currentUser.uid,
+          'toEmail': normalizedEmail,
+          'toUid': peerUid,
+          'recipientUid': peerUid,
+          'relation': relation.trim(),
+          'avatarColor': memberColor.toARGB32(),
+          'status': 'pending',
+          'createdAt': FieldValue.serverTimestamp(),
+        };
+        final docRef = _firestore.collection('invitations').doc();
+        await docRef.set(payload);
+      } catch (e) {
+        debugPrint('[AppState] Gửi invitation Firestore error: $e');
       }
-    } else {
+    }
+
+    final existing = _familyMembers.indexWhere((element) =>
+        element.id == peerUid ||
+        (normalizedEmail.isNotEmpty && element.email != null && element.email == normalizedEmail));
+    if (existing == -1) {
       _familyMembers.add(member);
+    } else {
+      _familyMembers[existing] = member;
     }
 
     final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
     addAuditLog(
-      '$hhmm - [LỜI MỜI GỬI ĐI] Đã gửi yêu cầu kết nối tới "${member.name}" (${member.relation}) • Vị trí bị khóa cho đến khi đối phương chấp thuận',
+      '$hhmm - [LỜI MỜI GỬI ĐI] Đã gửi yêu cầu kết nối tới "${member.name}" (${member.relation}) • Vị trí bị khóa cho đến khi đối phương chấp thuận • UID: $peerUid',
     );
     notifyListeners();
+    return null;
   }
 
   /// Nhận được một lời mời kết nối từ người khác đến tài khoản hiện tại.
@@ -1065,16 +1196,32 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      await _firestore.collection('invitations').doc(id).update({'status': 'accepted'});
-      final invDoc = await _firestore.collection('invitations').doc(id).get();
-      final data = invDoc.data();
-      final fromUid = data?['fromUid']?.toString();
+      // 1. Thử cập nhật Firestore invitation trực tiếp theo docId
+      try {
+        await _firestore.collection('invitations').doc(id).update({'status': 'accepted'});
+      } catch (_) {}
+
+      // 2. Tìm và cập nhật invitation theo toEmail và fromUid = id
+      final myEmail = _currentUserEmail;
       final myUid = _currentUserUid;
-      if (myUid != null && myUid.isNotEmpty && fromUid != null && fromUid.isNotEmpty) {
+      if (myEmail != null && myEmail.isNotEmpty) {
+        final query = await _firestore
+            .collection('invitations')
+            .where('toEmail', isEqualTo: myEmail)
+            .where('fromUid', isEqualTo: id)
+            .get();
+        for (final doc in query.docs) {
+          await doc.reference.update({'status': 'accepted'});
+        }
+      }
+
+      // 3. Cập nhật users/{uid}.members cho cả hai bên
+      final peerUid = id;
+      if (myUid != null && myUid.isNotEmpty && peerUid.isNotEmpty) {
         await _firestore.collection('users').doc(myUid).set({
-          'members': FieldValue.arrayUnion([fromUid]),
+          'members': FieldValue.arrayUnion([peerUid]),
         }, SetOptions(merge: true));
-        await _firestore.collection('users').doc(fromUid).set({
+        await _firestore.collection('users').doc(peerUid).set({
           'members': FieldValue.arrayUnion([myUid]),
         }, SetOptions(merge: true));
       }
@@ -1129,6 +1276,7 @@ class AppState extends ChangeNotifier {
     Color? color,
     LatLng? location,
     String? email,
+    String? uid,
     MemberConnectionStatus status = MemberConnectionStatus.pendingOutgoing,
   }) {
     if (status == MemberConnectionStatus.pendingOutgoing) {
@@ -1144,8 +1292,11 @@ class AppState extends ChangeNotifier {
       final Color memberColor =
           color ?? memberPalette[count % memberPalette.length];
 
+      final memberId = uid ??
+          (email != null && email.isNotEmpty ? 'uid_${_normalizeEmail(email)}' : _uuid.v4());
+
       final member = FamilyMemberItem(
-        id: _uuid.v4(),
+        id: memberId,
         name: name.trim(),
         relation: relation.trim(),
         avatarColor: memberColor,
@@ -1226,6 +1377,7 @@ class AppState extends ChangeNotifier {
         name: partnerName,
         relation: 'Người thân',
         email: partnerEmail,
+        uid: fromUid,
         status: MemberConnectionStatus.accepted,
       );
 
@@ -1408,11 +1560,12 @@ class AppState extends ChangeNotifier {
   Future<UserSecurityProfile> signInWithTestAccount({
     required String email,
     required String displayName,
+    String? uid,
   }) async {
     _isAuthLoading = true;
     notifyListeners();
     try {
-      final safeUid =
+      final safeUid = uid ??
           'test_uid_${email.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
       final profile = await _auth.provisionOrLoadUserKeys(
         uid: safeUid,
