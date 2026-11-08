@@ -45,6 +45,18 @@ class EncryptedPayload {
       ciphertext: Uint8List.fromList(data.sublist(28)),
     );
   }
+
+  factory EncryptedPayload.fromBase64({
+    required String ciphertextBase64,
+    required String nonceBase64,
+    required String macBase64,
+  }) {
+    return EncryptedPayload(
+      ciphertext: Uint8List.fromList(base64Decode(ciphertextBase64)),
+      nonce: Uint8List.fromList(base64Decode(nonceBase64)),
+      mac: Uint8List.fromList(base64Decode(macBase64)),
+    );
+  }
 }
 
 class CryptoService {
@@ -125,6 +137,50 @@ class CryptoService {
       secretKey: sharedSecret,
       nonce: Uint8List(32), // Chuẩn RFC 5869: salt mặc định 32 byte 0 cho SHA-256 (tránh Empty key trên Android JCE)
       info: utf8.encode('sos_safe_family_aes_key'),
+    );
+  }
+
+  /// Dẫn xuất khóa phiên 32-byte (AES-256) chuẩn cho một phòng chat định danh.
+  /// Đảm bảo hai bên cùng tham gia phòng chat đều tính ra đúng cùng một khóa phiên
+  /// để mã hóa và giải mã E2EE qua lại thành công.
+  Future<Uint8List> deriveRoomKey(String roomId) async {
+    final bytes = utf8.encode('sos_chat_room_key_salt_$roomId');
+    final hash = await Sha256().hash(bytes);
+    return Uint8List.fromList(hash.bytes);
+  }
+
+  /// Dẫn xuất khóa phiên E2EE 32-byte (AES-256) giữa 2 người dùng qua ECDH X25519 + HKDF-SHA256.
+  ///
+  /// Thỏa thuận khóa Diffie-Hellman:
+  /// - Người A: myKeyPair = keyPairA, theirPublicKeyB64 = publicKeyB
+  /// - Người B: myKeyPair = keyPairB, theirPublicKeyB64 = publicKeyA
+  /// Cả hai bên đều tính ra cùng một khóa phiên AES-256 (32 bytes) dùng cho phòng chat E2EE.
+  Future<Uint8List> deriveChatKeyForPeer({
+    required SimpleKeyPair myKeyPair,
+    required String theirPublicKeyB64,
+  }) async {
+    final theirPublicKey = await importPublicKey(theirPublicKeyB64);
+    final secretKey = await deriveSharedKey(
+      myKeyPair: myKeyPair,
+      theirPublicKey: theirPublicKey,
+    );
+    final keyBytes = await secretKey.extractBytes();
+    return Uint8List.fromList(keyBytes);
+  }
+
+  /// Dẫn xuất khóa phiên E2EE từ private key và public key dạng Base64 lưu trong Keystore.
+  Future<Uint8List> deriveChatKeyFromB64({
+    required String myPrivateKeyB64,
+    required String myPublicKeyB64,
+    required String theirPublicKeyB64,
+  }) async {
+    final myKeyPair = await importKeyPair(
+      privateKeyB64: myPrivateKeyB64,
+      publicKeyB64: myPublicKeyB64,
+    );
+    return deriveChatKeyForPeer(
+      myKeyPair: myKeyPair,
+      theirPublicKeyB64: theirPublicKeyB64,
     );
   }
 

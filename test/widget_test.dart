@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sos_safe_family/core/app_state.dart';
 
 import 'package:sos_safe_family/main.dart';
 
@@ -154,5 +155,18 @@ void main() {
     expect(find.text('Vùng an toàn'), findsOneWidget);
     expect(find.text('Nhà riêng'), findsOneWidget);
     expect(find.text('Cơ quan / Trường học'), findsOneWidget);
+  });
+
+  test('signOut clears family member state to isolate next account', () async {
+    final state = AppState();
+
+    state.sendInvitation(name: 'Bố', relation: 'Cha');
+    state.receiveIncomingInvitation(name: 'Mẹ', relation: 'Mẹ', email: 'me@example.com');
+
+    expect(state.familyMembers, hasLength(2));
+
+    await state.signOut();
+
+    expect(state.familyMembers, isEmpty);
   });
 }

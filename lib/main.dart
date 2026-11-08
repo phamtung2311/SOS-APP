@@ -44,6 +44,7 @@ class _SOSFamilyAppState extends State<SOSFamilyApp> with WidgetsBindingObserver
       if (_state.flagSecureEnabled) {
         _state.setFlagSecure(true);
       }
+      _state.initForegroundTask();
     });
   }
 
@@ -192,7 +193,16 @@ class _MainScreenState extends State<MainScreen> {
                   top: 0,
                   left: 0,
                   right: 0,
-                  child: _SosEmergencyBanner(appState: appState),
+                  child: _SosEmergencyBanner(
+                    appState: appState,
+                    onOpenMap: () {
+                      _handleNavTap(0, appState);
+                      final active = appState.activeSos;
+                      if (active != null) {
+                        appState.focusLocation(LatLng(active.lat, active.lng));
+                      }
+                    },
+                  ),
                 ),
             ],
           ),
@@ -317,78 +327,202 @@ class _MainScreenState extends State<MainScreen> {
         onCancel: () => Navigator.of(dialogContext).pop(),
         onConfirm: () async {
           Navigator.of(dialogContext).pop();
-          await appState.activateSos(
-            lat: lat,
-            lng: lng,
-            isMocked: mocked,
-            senderName: 'Chính chủ',
-          );
+          try {
+            await appState.activateSos(
+              lat: lat,
+              lng: lng,
+              isMocked: mocked,
+              senderName: appState.userProfile?.displayName ?? 'Chính chủ',
+            );
+          } catch (e) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('⚠️ Lỗi gửi cảnh báo SOS lên máy chủ: $e'),
+                  backgroundColor: const Color(0xFFD32F2F),
+                ),
+              );
+            }
+          }
         },
       ),
     );
   }
 }
 
-/// Banner đỏ "TRẠNG THÁI KHẨN CẤP ĐANG BẬT" nổi trên đỉnh ứng dụng.
-class _SosEmergencyBanner extends StatelessWidget {
-  const _SosEmergencyBanner({required this.appState});
+/// Banner đỏ "TRẠNG THÁI KHẨN CẤP ĐANG BẬT" (cho người gửi) hoặc
+/// Banner cảnh báo SOS người thân (cho người nhận) nổi trên đỉnh ứng dụng.
+class SosEmergencyBanner extends StatelessWidget {
+  const SosEmergencyBanner({
+    super.key,
+    required this.appState,
+    this.onOpenMap,
+  });
 
   final AppState appState;
+  final VoidCallback? onOpenMap;
+
+  String _formatTime(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
     final SosEvent? active = appState.activeSos;
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFFB71C1C),
-        boxShadow: const [
-          BoxShadow(color: Color(0x55B71C1C), blurRadius: 14, offset: Offset(0, 4)),
-        ],
-      ),
-      padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
-      child: Row(
-        children: [
-          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'TRẠNG THÁI KHẨN CẤP ĐANG BẬT',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 13,
-                    letterSpacing: 0.6,
+    if (active == null) return const SizedBox.shrink();
+
+    // 1. Phía Người bấm SOS (Chính chủ)
+    if (appState.isMySos) {
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFFB71C1C),
+          boxShadow: const [
+            BoxShadow(color: Color(0x55B71C1C), blurRadius: 14, offset: Offset(0, 4)),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'TRẠNG THÁI KHẨN CẤP ĐANG BẬT',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 13,
+                      letterSpacing: 0.6,
+                    ),
                   ),
-                ),
-                if (active != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Text(
-                      'Đã mã hóa E2EE • Gửi tới gia đình lúc ${active.timestamp.hour.toString().padLeft(2, '0')}:${active.timestamp.minute.toString().padLeft(2, '0')}',
-                      style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      appState.isSosDelivered
+                          ? 'Đã mã hóa E2EE • Đã gửi tới gia đình lúc ${_formatTime(active.timestamp)}'
+                          : appState.sosError != null
+                              ? '⚠️ Chưa gửi được tới máy chủ (Đang lưu cục bộ)'
+                              : 'Đã mã hóa E2EE • Đang gửi tới gia đình…',
+                      style: TextStyle(
+                        color: appState.sosError != null ? const Color(0xFFFFCDD2) : Colors.white70,
+                        fontSize: 11,
+                        fontWeight: appState.sosError != null ? FontWeight.bold : FontWeight.normal,
+                      ),
                     ),
                   ),
-              ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              child: FilledButton.icon(
+                onPressed: () async {
+                  try {
+                    await appState.resolveSos();
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('❌ Lỗi cập nhật trạng thái an toàn: $e'),
+                          backgroundColor: const Color(0xFFD32F2F),
+                        ),
+                      );
+                    }
+                  }
+                },
+                icon: const Icon(Icons.check_rounded, size: 16),
+                label: const Text(
+                  'TÔI ĐÃ AN TOÀN',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.6),
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFFB71C1C),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // 2. Phía Người nhận SOS (Người thân trong gia đình)
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFC62828),
+        boxShadow: const [
+          BoxShadow(color: Color(0x66C62828), blurRadius: 16, offset: Offset(0, 4)),
+        ],
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.warning_rounded, color: Colors.white, size: 22),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '⚠️ ${active.senderName.toUpperCase()} GỬI SOS',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 13.5,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Padding(
+            padding: const EdgeInsets.only(left: 30),
+            child: Text(
+              'Tọa độ: ${active.lat.toStringAsFixed(4)}, ${active.lng.toStringAsFixed(4)} • Pin: ${active.batteryLevel != null ? "${active.batteryLevel}%" : "—"} lúc ${_formatTime(active.timestamp)}',
+              style: const TextStyle(color: Colors.white70, fontSize: 11),
             ),
           ),
-          const SizedBox(width: 8),
-          SizedBox(
-            child: FilledButton.icon(
-              onPressed: () => appState.resolveSos(),
-              icon: const Icon(Icons.check_rounded, size: 16),
-              label: const Text(
-                'TÔI ĐÃ AN TOÀN',
-                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.6),
-              ),
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: const Color(0xFFB71C1C),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.only(left: 30),
+            child: Row(
+              children: [
+                FilledButton.icon(
+                  onPressed: onOpenMap,
+                  icon: const Icon(Icons.map_rounded, size: 14),
+                  label: const Text(
+                    'Mở bản đồ',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFFC62828),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => appState.dismissIncomingSos(),
+                  icon: const Icon(Icons.check_circle_outline_rounded, size: 14, color: Colors.white),
+                  label: const Text(
+                    'Tôi đã hỗ trợ',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11, color: Colors.white),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.white70),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -396,6 +530,8 @@ class _SosEmergencyBanner extends StatelessWidget {
     );
   }
 }
+
+typedef _SosEmergencyBanner = SosEmergencyBanner;
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -409,43 +545,23 @@ class _MapScreenState extends State<MapScreen> {
   LatLng? _myLocation;
   bool _isLoadingLocation = false;
   bool _isMockGps = false;
-
-  final List<FamilyMember> _members = const [
-    FamilyMember(
-      name: 'Bố',
-      relation: 'Cha',
-      initial: 'B',
-      color: Color(0xFF7E57C2),
-      battery: 88,
-      lastUpdated: '2 phút trước',
-      location: LatLng(21.0285, 105.8542),
-    ),
-    FamilyMember(
-      name: 'Mẹ',
-      relation: 'Mẹ',
-      initial: 'M',
-      color: Color(0xFF43A047),
-      battery: 75,
-      lastUpdated: '1 phút trước',
-      location: LatLng(21.0185, 105.8021),
-    ),
-    FamilyMember(
-      name: 'Con',
-      relation: 'Con trai',
-      initial: 'C',
-      color: Color(0xFF1E88E5),
-      battery: 91,
-      lastUpdated: '30 giây trước',
-      location: LatLng(21.0441, 105.8482),
-    ),
-  ];
+  StreamSubscription<Position>? _positionStreamSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      final appState = AppScope.read(context);
+      appState.initSosListener();
+      appState.initLocationListeners();
       _determinePosition();
     });
+  }
+
+  @override
+  void dispose() {
+    _positionStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _determinePosition() async {
@@ -504,6 +620,24 @@ class _MapScreenState extends State<MapScreen> {
         AppScope.read(context).updatePosition(position);
         _mapController.move(userLoc, 16.0);
       }
+
+      // Đăng ký stream vị trí thời gian thực (distanceFilter ~10m)
+      _positionStreamSub?.cancel();
+      _positionStreamSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 10,
+        ),
+      ).listen((pos) {
+        if (!mounted) return;
+        setState(() {
+          _myLocation = LatLng(pos.latitude, pos.longitude);
+          _isMockGps = pos.isMocked;
+        });
+        AppScope.read(context).updatePosition(pos);
+      }, onError: (err) {
+        debugPrint('[MapScreen] Position stream error: $err');
+      });
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingLocation = false);
@@ -514,7 +648,7 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  void _showMemberBottomSheet(FamilyMember member) {
+  void _showMemberBottomSheet(FamilyMemberItem member) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -538,7 +672,7 @@ class _MapScreenState extends State<MapScreen> {
               children: [
                 CircleAvatar(
                   radius: 28,
-                  backgroundColor: member.color,
+                  backgroundColor: member.avatarColor,
                   foregroundColor: Colors.white,
                   child: Text(member.initial, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
                 ),
@@ -555,9 +689,21 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
             const SizedBox(height: 20),
-            _InfoRow(label: 'Pin', value: '${member.battery}%'),
-            _InfoRow(label: 'Cập nhật', value: member.lastUpdated),
-            _InfoRow(label: 'Trạng thái', value: 'An toàn'),
+            _InfoRow(label: 'Pin', value: member.battery != null ? '${member.battery}%' : '—'),
+            _InfoRow(
+              label: 'Vị trí',
+              value: member.location != null
+                  ? '${member.location!.latitude.toStringAsFixed(4)}, ${member.location!.longitude.toStringAsFixed(4)}'
+                  : 'Chưa có dữ liệu vị trí',
+            ),
+            _InfoRow(label: 'Cập nhật', value: member.lastUpdated ?? 'Chưa có dữ liệu'),
+            _InfoRow(
+              label: 'Xác thực GPS',
+              value: member.isMocked
+                  ? '⚠️ Phát hiện Fake GPS / Mock Location'
+                  : '✅ GPS thực tế (Hợp lệ)',
+            ),
+            _InfoRow(label: 'Trạng thái', value: member.isAccepted ? 'Đã kết nối bảo mật' : 'Đang chờ phê duyệt'),
             const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
@@ -590,7 +736,11 @@ class _MapScreenState extends State<MapScreen> {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => FamilyChatScreen(memberName: member.name),
+                        builder: (_) => FamilyChatScreen(
+                          memberName: member.name,
+                          peerEmail: member.email,
+                          memberId: member.id,
+                        ),
                       ),
                     );
                   }
@@ -754,6 +904,13 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildScaffold(BuildContext context, AppState appState) {
+    final focused = appState.focusedLocation;
+    if (focused != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _mapController.move(focused, 16.0);
+        appState.clearFocusedLocation();
+      });
+    }
     return Scaffold(
       appBar: AppBar(
         title: const Text('Bản đồ gia đình'),
@@ -811,33 +968,77 @@ class _MapScreenState extends State<MapScreen> {
               ),
               MarkerLayer(
                 markers: [
-                  // Family members
-                  ..._members.map(
+                  // Chỉ hiển thị thành viên ĐÃ ĐƯỢC CHẤP THUẬN & có dữ liệu vị trí thực tế
+                  ...appState.familyMembers
+                      .where((m) => m.isAccepted && m.isSharing && m.location != null)
+                      .map(
                     (member) => Marker(
-                      point: member.location,
-                      width: 52,
-                      height: 52,
+                      point: member.location!,
+                      width: 64,
+                      height: 64,
                       child: GestureDetector(
                         onTap: () => _showMemberBottomSheet(member),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: member.color,
-                            border: Border.all(color: Colors.white, width: 3),
-                            boxShadow: const [
-                              BoxShadow(color: Color(0x44000000), blurRadius: 8, offset: Offset(0, 4)),
-                            ],
-                          ),
-                          child: Center(
-                            child: Text(
-                              member.initial,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 18,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          clipBehavior: Clip.none,
+                          children: [
+                            Container(
+                              width: 50,
+                              height: 50,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: member.avatarColor,
+                                border: Border.all(
+                                  color: member.isMocked
+                                      ? const Color(0xFFFF9800)
+                                      : Colors.white,
+                                  width: member.isMocked ? 3.5 : 3,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: member.isMocked
+                                        ? const Color(0x66FF9800)
+                                        : const Color(0x44000000),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: Center(
+                                child: Text(
+                                  member.initial,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 18,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
+                            if (member.isMocked)
+                              Positioned(
+                                bottom: -2,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFFF9800),
+                                    borderRadius: BorderRadius.circular(4),
+                                    boxShadow: const [
+                                      BoxShadow(color: Colors.black26, blurRadius: 3),
+                                    ],
+                                  ),
+                                  child: const Text(
+                                    'Fake GPS',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w900,
+                                      letterSpacing: 0.3,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     ),
@@ -1041,8 +1242,10 @@ class _GeofenceTile extends StatelessWidget {
                 child: Switch.adaptive(
                   value: fence.isEnabled,
                   onChanged: (_) => onToggle(),
-                  activeThumbColor: const Color(0xFFE53935),
-                  activeTrackColor: const Color(0xFFE53935),
+                  activeThumbColor: Colors.white,
+                  activeTrackColor: const Color(0xFF16A34A),
+                  inactiveThumbColor: Colors.white,
+                  inactiveTrackColor: const Color(0xFFCBD5E1),
                 ),
               ),
             ],
@@ -1051,26 +1254,6 @@ class _GeofenceTile extends StatelessWidget {
       ),
     );
   }
-}
-
-class FamilyMember {
-  final String name;
-  final String relation;
-  final String initial;
-  final Color color;
-  final int battery;
-  final String lastUpdated;
-  final LatLng location;
-
-  const FamilyMember({
-    required this.name,
-    required this.relation,
-    required this.initial,
-    required this.color,
-    required this.battery,
-    required this.lastUpdated,
-    required this.location,
-  });
 }
 
 class _InfoRow extends StatelessWidget {
@@ -1102,170 +1285,473 @@ class CircleScreen extends StatefulWidget {
 }
 
 class _CircleScreenState extends State<CircleScreen> {
-  final List<_CircleMember> _members = [
-    _CircleMember(name: 'Bố', relation: 'Cha', isSharing: true, avatarColor: const Color(0xFF7E57C2)),
-    _CircleMember(name: 'Mẹ', relation: 'Mẹ', isSharing: true, avatarColor: const Color(0xFF43A047)),
-    _CircleMember(name: 'Con', relation: 'Con trai', isSharing: false, avatarColor: const Color(0xFF1E88E5)),
-  ];
+  void _showAddMemberDialog(BuildContext context, AppState appState) {
+    final formKey = GlobalKey<FormState>();
+    final nameController = TextEditingController();
+    final emailController = TextEditingController();
+    String selectedRelation = 'Bạn bè';
+    Color selectedColor = AppState.memberPalette[0];
 
-  void _showInviteCode() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (bottomSheetContext) => StatefulBuilder(
+        builder: (context, setModalState) => Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 20,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+          ),
+          child: SingleChildScrollView(
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 44,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'Gửi lời mời kết nối gia đình',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF1E293B),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF3E0),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Icon(Icons.security_rounded, size: 18, color: Color(0xFFE65100)),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Bảo mật vị trí: Vị trí của người này sẽ chỉ được hiển thị sau khi họ mở app và xác nhận chấp thuận chia sẻ vị trí.',
+                            style: TextStyle(fontSize: 12, color: Color(0xFFE65100), height: 1.3),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: nameController,
+                    decoration: InputDecoration(
+                      labelText: 'Tên người nhận lời mời *',
+                      hintText: 'Ví dụ: Nguyên Vũ, Văn Tuấn, Vợ...',
+                      prefixIcon: const Icon(Icons.person_outline),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty) {
+                        return 'Vui lòng nhập tên người nhận';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedRelation,
+                    decoration: InputDecoration(
+                      labelText: 'Mối quan hệ *',
+                      prefixIcon: const Icon(Icons.diversity_3_outlined),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'Bố', child: Text('Bố / Cha')),
+                      DropdownMenuItem(value: 'Mẹ', child: Text('Mẹ')),
+                      DropdownMenuItem(value: 'Con trai', child: Text('Con trai')),
+                      DropdownMenuItem(value: 'Con gái', child: Text('Con gái')),
+                      DropdownMenuItem(value: 'Vợ', child: Text('Vợ')),
+                      DropdownMenuItem(value: 'Chồng', child: Text('Chồng')),
+                      DropdownMenuItem(value: 'Anh/Chị', child: Text('Anh / Chị')),
+                      DropdownMenuItem(value: 'Em', child: Text('Em ruột')),
+                      DropdownMenuItem(value: 'Bạn bè', child: Text('Bạn bè')),
+                      DropdownMenuItem(value: 'Khác', child: Text('Khác')),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setModalState(() => selectedRelation = val);
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      labelText: 'Email tài khoản Google (Tùy chọn)',
+                      hintText: 'nguyen.vu@gmail.com',
+                      prefixIcon: const Icon(Icons.email_outlined),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'Chọn màu đại diện avatar:',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 12,
+                    children: AppState.memberPalette.map((color) {
+                      final isSelected = selectedColor == color;
+                      return GestureDetector(
+                        onTap: () {
+                          setModalState(() => selectedColor = color);
+                        },
+                        child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected ? Colors.black87 : Colors.white,
+                              width: isSelected ? 3 : 2,
+                            ),
+                            boxShadow: [
+                              if (isSelected)
+                                BoxShadow(
+                                  color: color.withValues(alpha: 0.5),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 2),
+                                ),
+                            ],
+                          ),
+                          child: isSelected
+                              ? const Icon(Icons.check, size: 20, color: Colors.white)
+                              : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        if (formKey.currentState?.validate() ?? false) {
+                          appState.sendInvitation(
+                            name: nameController.text.trim(),
+                            relation: selectedRelation,
+                            email: emailController.text.trim().isEmpty
+                                ? null
+                                : emailController.text.trim(),
+                            color: selectedColor,
+                          );
+                          Navigator.pop(bottomSheetContext);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                '📨 Đã gửi lời mời tới "${nameController.text.trim()}". Đang chờ đối phương chấp thuận ủy quyền vị trí!',
+                              ),
+                              backgroundColor: const Color(0xFFE65100),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.send_rounded),
+                      label: const Text(
+                        'Gửi lời mời kết nối & chia sẻ',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1E88E5),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showInviteAndJoinDialog(BuildContext context, AppState appState) {
+    final codeController = TextEditingController();
+    final inviteeNameController = TextEditingController();
+    bool isGenerating = false;
+    bool isConnecting = false;
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Mời thành viên'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: const [
-            Text('Mã mời gia đình'),
-            SizedBox(height: 12),
-            Text(
-              '482615',
-              style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 8, color: Color(0xFFE53935)),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(
+            children: const [
+              Icon(Icons.vpn_key_rounded, color: Color(0xFFE53935)),
+              SizedBox(width: 10),
+              Text('Mã mời & Kết nối', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF3E0),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'MÃ MỜI GIA ĐÌNH CỦA BẠN:',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFFE65100),
+                          letterSpacing: 1.1,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      if (appState.myPairingCode != null) ...[
+                        Center(
+                          child: Text(
+                            appState.myPairingCode!,
+                            style: const TextStyle(
+                              fontSize: 32,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 8,
+                              color: Color(0xFFE53935),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Center(
+                          child: Text(
+                            'Gửi mã 6 số này cho người thân để kết nối',
+                            style: TextStyle(fontSize: 11, color: Colors.black54),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Center(
+                          child: TextButton.icon(
+                            onPressed: isGenerating
+                                ? null
+                                : () async {
+                                    setDialogState(() => isGenerating = true);
+                                    await appState.generatePairingCode();
+                                    if (ctx.mounted) {
+                                      setDialogState(() => isGenerating = false);
+                                    }
+                                  },
+                            icon: const Icon(Icons.refresh_rounded, size: 14),
+                            label: const Text('Tạo mã khác', style: TextStyle(fontSize: 11)),
+                          ),
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 8),
+                        Center(
+                          child: FilledButton.icon(
+                            onPressed: isGenerating
+                                ? null
+                                : () async {
+                                    setDialogState(() => isGenerating = true);
+                                    await appState.generatePairingCode();
+                                    if (ctx.mounted) {
+                                      setDialogState(() => isGenerating = false);
+                                    }
+                                  },
+                            icon: isGenerating
+                                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : const Icon(Icons.add_rounded, size: 16),
+                            label: const Text('Tạo mã mời của bạn'),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFFE65100),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Center(
+                          child: Text(
+                            'Bấm nút để sinh mã mời ngẫu nhiên và lưu lên hệ thống',
+                            style: TextStyle(fontSize: 11, color: Colors.black54),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Divider(),
+                const SizedBox(height: 8),
+                const Text(
+                  'HOẶC NHẬP MÃ CỦA NGƯỜI KHÁC:',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1E88E5),
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: codeController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: InputDecoration(
+                    labelText: 'Mã mời 6 số',
+                    hintText: 'Ví dụ: 789123',
+                    prefixIcon: const Icon(Icons.pin_outlined),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    counterText: '',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: inviteeNameController,
+                  decoration: InputDecoration(
+                    labelText: 'Tên người mời / người thân',
+                    hintText: 'Ví dụ: Phạm Nguyên Vũ',
+                    prefixIcon: const Icon(Icons.person_outline),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Đóng'),
+            ),
+            ElevatedButton(
+              onPressed: isConnecting
+                  ? null
+                  : () async {
+                      final code = codeController.text.trim();
+                      final name = inviteeNameController.text.trim();
+                      if (code.length != 6) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Vui lòng nhập đúng 6 chữ số mã mời')),
+                        );
+                        return;
+                      }
+
+                      setDialogState(() => isConnecting = true);
+                      final success = await appState.connectWithPairingCode(
+                        code: code,
+                        memberName: name.isNotEmpty ? name : null,
+                      );
+
+                      if (ctx.mounted) {
+                        setDialogState(() => isConnecting = false);
+                      }
+
+                      if (!success) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('❌ Mã không hợp lệ hoặc đã hết hạn'),
+                              backgroundColor: Color(0xFFD32F2F),
+                            ),
+                          );
+                        }
+                        return;
+                      }
+
+                      if (context.mounted) {
+                        Navigator.of(dialogContext).pop();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('✅ Đã kết nối thành công với "${name.isNotEmpty ? name : 'Mã $code'}"!'),
+                            backgroundColor: const Color(0xFF2E7D32),
+                          ),
+                        );
+                      }
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E88E5),
+                foregroundColor: Colors.white,
+              ),
+              child: isConnecting
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Text('Kết nối ngay'),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _confirmDeleteMember(BuildContext context, AppState appState, FamilyMemberItem member) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Ngắt kết nối thành viên'),
+        content: Text(
+          'Bạn có chắc muốn xóa "${member.name}" (${member.relation}) khỏi vòng tròn gia đình?\n\n'
+          'Sau khi xóa, ứng dụng sẽ thu hồi khóa chia sẻ vị trí và kênh chat bảo mật E2EE.',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Đóng')),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFE53935)),
+            onPressed: () {
+              appState.removeFamilyMember(member.id);
+              Navigator.of(dialogContext).pop();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Đã ngắt kết nối với "${member.name}"'),
+                ),
+              );
+            },
+            child: const Text('Xác nhận xóa'),
+          ),
         ],
       ),
     );
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Vòng tròn gia đình'),
-        backgroundColor: Colors.white,
-        elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Card(
-              elevation: 0,
-              color: const Color(0xFFEAF5FF),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    const Icon(Icons.location_on, color: Color(0xFF1E88E5)),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Chia sẻ vị trí của tôi', style: TextStyle(fontWeight: FontWeight.w700)),
-                          Text('Đang bật cho các thành viên gần đây'),
-                        ],
-                      ),
-                    ),
-                    Switch.adaptive(
-                      value: true,
-                      onChanged: (_) {},
-                      activeThumbColor: const Color(0xFFE53935),
-                      activeTrackColor: const Color(0xFFE53935),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Expanded(
-              child: ListView.separated(
-                itemCount: _members.length,
-                separatorBuilder: (context, index) => const Divider(height: 1),
-                itemBuilder: (context, index) {
-                  final member = _members[index];
-                  return ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => FamilyChatScreen(memberName: member.name),
-                        ),
-                      );
-                    },
-                    leading: CircleAvatar(
-                      radius: 24,
-                      backgroundColor: member.avatarColor,
-                      foregroundColor: Colors.white,
-                      child: Text(member.name.substring(0, 1), style: const TextStyle(fontWeight: FontWeight.w700)),
-                    ),
-                    title: Text(member.name,
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
-                    subtitle: Text('${member.relation} • Chạm để chat E2EE'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.chat_bubble_outline, color: Color(0xFF1E88E5)),
-                          tooltip: 'Nhắn tin bảo mật E2EE',
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => FamilyChatScreen(memberName: member.name),
-                              ),
-                            );
-                          },
-                        ),
-                        Switch.adaptive(
-                          value: member.isSharing,
-                          onChanged: (value) {
-                            setState(() {
-                              member.isSharing = value;
-                            });
-                          },
-                          activeThumbColor: const Color(0xFFE53935),
-                          activeTrackColor: const Color(0xFFE53935),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _showInviteCode,
-                icon: const Icon(Icons.person_add_alt_1_rounded),
-                label: const Text('Mời thành viên'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFFE53935),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _CircleMember {
-  final String name;
-  final String relation;
-  final Color avatarColor;
-  bool isSharing;
-
-  _CircleMember({
-    required this.name,
-    required this.relation,
-    required this.avatarColor,
-    required this.isSharing,
-  });
-}
-
-class AuditLogScreen extends StatelessWidget {
-  const AuditLogScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -1274,12 +1760,587 @@ class AuditLogScreen extends StatelessWidget {
     return AnimatedBuilder(
       animation: appState,
       builder: (context, _) {
-        final auditLogs = <String>[
-          ...appState.auditLogs,
-          '08:30 - Bố đã xem vị trí của bạn',
-          '09:15 - Mẹ đã xem vị trí của bạn',
-          '11:40 - Con đã xem vị trí của bạn',
-        ];
+        final members = appState.familyMembers;
+        final incoming = members.where((m) => m.isPendingIncoming).toList();
+        final outgoing = members.where((m) => m.isPendingOutgoing).toList();
+        final accepted = members.where((m) => m.isAccepted).toList();
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Vòng tròn gia đình'),
+            backgroundColor: Colors.white,
+            elevation: 0,
+            actions: [
+              IconButton(
+                tooltip: 'Gửi lời mời kết nối',
+                icon: const Icon(Icons.person_add_rounded, color: Color(0xFF1E88E5)),
+                onPressed: () => _showAddMemberDialog(context, appState),
+              ),
+              IconButton(
+                tooltip: 'Mã mời kết nối',
+                icon: const Icon(Icons.vpn_key_rounded, color: Color(0xFF1E88E5)),
+                onPressed: () => _showInviteAndJoinDialog(context, appState),
+              ),
+            ],
+          ),
+          body: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: appState.isMyLocationSharingEnabled
+                        ? const Color(0xFFF0FDF4)
+                        : const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: appState.isMyLocationSharingEnabled
+                          ? const Color(0xFFBBF7D0)
+                          : const Color(0xFFE2E8F0),
+                      width: 1.2,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(9),
+                        decoration: BoxDecoration(
+                          color: appState.isMyLocationSharingEnabled
+                              ? const Color(0xFFDCFCE7)
+                              : const Color(0xFFE2E8F0),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          appState.isMyLocationSharingEnabled
+                              ? Icons.location_on_rounded
+                              : Icons.location_off_rounded,
+                          color: appState.isMyLocationSharingEnabled
+                              ? const Color(0xFF16A34A)
+                              : const Color(0xFF64748B),
+                          size: 22,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Text(
+                                  'Chia sẻ vị trí của tôi',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14.5,
+                                    color: Color(0xFF1E293B),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: appState.isMyLocationSharingEnabled
+                                        ? const Color(0xFFDCFCE7)
+                                        : const Color(0xFFE2E8F0),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    appState.isMyLocationSharingEnabled ? 'Đang phát' : 'Đã tạm dừng',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: appState.isMyLocationSharingEnabled
+                                          ? const Color(0xFF15803D)
+                                          : const Color(0xFF64748B),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              appState.isMyLocationSharingEnabled
+                                  ? 'Ủy quyền 2 chiều & Mã hóa E2EE X25519'
+                                  : 'Tạm dừng chia sẻ tọa độ tới người thân',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: appState.isMyLocationSharingEnabled
+                                    ? const Color(0xFF15803D)
+                                    : const Color(0xFF64748B),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Switch.adaptive(
+                        value: appState.isMyLocationSharingEnabled,
+                        onChanged: (val) => appState.setMyLocationSharing(val),
+                        activeThumbColor: Colors.white,
+                        activeTrackColor: const Color(0xFF16A34A),
+                        inactiveThumbColor: Colors.white,
+                        inactiveTrackColor: const Color(0xFFCBD5E1),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                if (members.isEmpty)
+                  Expanded(
+                    child: Center(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(22),
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFF1F5F9),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.diversity_3_rounded,
+                                size: 68,
+                                color: Color(0xFF64748B),
+                              ),
+                            ),
+                            const SizedBox(height: 20),
+                            const Text(
+                              'Chưa có thành viên gia đình',
+                              style: TextStyle(
+                                fontSize: 19,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1E293B),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Gửi lời mời kết nối tới người thân. Vị trí của hai bên chỉ được hiển thị sau khi đối phương bấm Chấp nhận trên điện thoại của họ (bảo vệ quyền riêng tư PII).',
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                color: Colors.grey.shade600,
+                                height: 1.4,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 24),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 48,
+                              child: FilledButton.icon(
+                                onPressed: () => _showAddMemberDialog(context, appState),
+                                icon: const Icon(Icons.person_add_alt_1_rounded),
+                                label: const Text(
+                                  'Gửi lời mời kết nối',
+                                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                                ),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFF1E88E5),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 48,
+                              child: OutlinedButton.icon(
+                                onPressed: () => _showInviteAndJoinDialog(context, appState),
+                                icon: const Icon(Icons.pin_outlined),
+                                label: const Text(
+                                  'Nhập mã mời kết nối',
+                                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF1E88E5),
+                                  side: const BorderSide(color: Color(0xFF1E88E5)),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: ListView(
+                      children: [
+                        // --- 1. LỜI MỜI ĐẾN (CẦN PHÊ DUYỆT CHIA SẺ VỊ TRÍ) ---
+                        if (incoming.isNotEmpty) ...[
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF8E1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFFFFB74D), width: 1.2),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(Icons.mark_email_unread_rounded, color: Color(0xFFE65100), size: 20),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Yêu cầu chia sẻ vị trí mới (${incoming.length})',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFE65100), fontSize: 14),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                ...incoming.map(
+                                  (req) => Card(
+                                    margin: const EdgeInsets.symmetric(vertical: 4),
+                                    elevation: 0,
+                                    color: Colors.white,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(12),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              CircleAvatar(
+                                                radius: 20,
+                                                backgroundColor: req.avatarColor,
+                                                child: Text(req.initial, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                              ),
+                                              const SizedBox(width: 10),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(req.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                                    Text('${req.relation} • Yêu cầu xem vị trí của bạn', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 10),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.end,
+                                            children: [
+                                              OutlinedButton(
+                                                onPressed: () => appState.rejectInvitation(req.id),
+                                                style: OutlinedButton.styleFrom(
+                                                  foregroundColor: Colors.red.shade700,
+                                                  side: BorderSide(color: Colors.red.shade300),
+                                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                                ),
+                                                child: const Text('Từ chối'),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              FilledButton.icon(
+                                                onPressed: () => appState.acceptInvitation(req.id),
+                                                icon: const Icon(Icons.check, size: 16),
+                                                label: const Text('Đồng ý chia sẻ'),
+                                                style: FilledButton.styleFrom(
+                                                  backgroundColor: const Color(0xFF2E7D32),
+                                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
+
+                        // --- 2. LỜI MỜI GỬI ĐI (CHỜ ĐỐI PHƯƠNG CHẤP THUẬN) ---
+                        if (outgoing.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(left: 4, bottom: 8),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.hourglass_top_rounded, size: 16, color: Color(0xFFF57C00)),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Đang chờ đối phương chấp thuận (${outgoing.length})',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFFF57C00)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          ...outgoing.map(
+                            (out) => Card(
+                              margin: const EdgeInsets.symmetric(vertical: 4),
+                              elevation: 0,
+                              color: const Color(0xFFF8FAFC),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: BorderSide(color: Colors.grey.shade300),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 20,
+                                          backgroundColor: out.avatarColor.withValues(alpha: 0.6),
+                                          child: Text(out.initial, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(out.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                              Text('${out.relation} • ⏳ Vị trí đang bị ẩn', style: TextStyle(color: Colors.orange.shade800, fontSize: 12, fontWeight: FontWeight.w600)),
+                                            ],
+                                          ),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.close, color: Colors.grey, size: 20),
+                                          tooltip: 'Thu hồi lời mời',
+                                          onPressed: () => appState.removeFamilyMember(out.id),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.info_outline, size: 14, color: Colors.black54),
+                                          const SizedBox(width: 6),
+                                          const Expanded(
+                                            child: Text(
+                                              'Vị trí sẽ hiển thị ngay khi đối phương bấm đồng ý.',
+                                              style: TextStyle(fontSize: 11, color: Colors.black87),
+                                            ),
+                                          ),
+                                          TextButton.icon(
+                                            onPressed: () => appState.simulatePeerApproval(out.id),
+                                            icon: const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF2E7D32)),
+                                            label: const Text(
+                                              'Mô phỏng: Đồng ý',
+                                              style: TextStyle(fontSize: 11, color: Color(0xFF2E7D32), fontWeight: FontWeight.bold),
+                                            ),
+                                            style: TextButton.styleFrom(
+                                              visualDensity: VisualDensity.compact,
+                                              padding: const EdgeInsets.symmetric(horizontal: 6),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
+
+                        // --- 3. THÀNH VIÊN ĐÃ KẾT NỐI (HIỂN THỊ VỊ TRÍ & CHAT E2EE) ---
+                        if (accepted.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(left: 4, bottom: 8),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.verified_user_rounded, size: 16, color: Color(0xFF2E7D32)),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Thành viên đã kết nối (${accepted.length})',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF2E7D32)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          ...accepted.map(
+                            (member) => Card(
+                              margin: const EdgeInsets.symmetric(vertical: 4),
+                              elevation: 0,
+                              color: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: BorderSide(color: Colors.grey.shade200),
+                              ),
+                              child: ListTile(
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => FamilyChatScreen(
+                                        memberName: member.name,
+                                        peerEmail: member.email,
+                                        memberId: member.id,
+                                      ),
+                                    ),
+                                  );
+                                },
+                                leading: CircleAvatar(
+                                  radius: 22,
+                                  backgroundColor: member.avatarColor,
+                                  foregroundColor: Colors.white,
+                                  child: Text(
+                                    member.initial,
+                                    style: const TextStyle(fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                                title: Text(
+                                  member.name,
+                                  style: const TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                                subtitle: Text(
+                                  '${member.relation} • Pin: ${member.battery != null ? "${member.battery}%" : "—"}\n${!member.isSharing ? "⏸️ Đã tạm dừng nhận vị trí" : member.location != null ? "✅ Vị trí trực tiếp • Chat E2EE" : "📍 Chưa có dữ liệu vị trí • Chat E2EE"}',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: member.isSharing ? Colors.black87 : Colors.grey.shade600,
+                                  ),
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.chat_bubble_outline_rounded, color: Color(0xFF1E88E5)),
+                                      tooltip: 'Nhắn tin bảo mật E2EE',
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => FamilyChatScreen(
+                                              memberName: member.name,
+                                              peerEmail: member.email,
+                                              memberId: member.id,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                    Switch.adaptive(
+                                      value: member.isSharing,
+                                      onChanged: (value) {
+                                        appState.toggleMemberSharing(member.id, value);
+                                      },
+                                      activeThumbColor: Colors.white,
+                                      activeTrackColor: const Color(0xFF16A34A),
+                                      inactiveThumbColor: Colors.white,
+                                      inactiveTrackColor: const Color(0xFFCBD5E1),
+                                    ),
+                                    IconButton(
+                                      icon: Icon(Icons.delete_outline_rounded, color: Colors.grey.shade600),
+                                      tooltip: 'Ngắt kết nối',
+                                      onPressed: () => _confirmDeleteMember(context, appState, member),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                if (members.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: () => _showAddMemberDialog(context, appState),
+                          icon: const Icon(Icons.person_add_alt_1_rounded),
+                          label: const Text('Gửi lời mời'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF1E88E5),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _showInviteAndJoinDialog(context, appState),
+                          icon: const Icon(Icons.vpn_key_rounded),
+                          label: const Text('Mã mời'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF1E88E5),
+                            side: const BorderSide(color: Color(0xFF1E88E5)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class AuditLogScreen extends StatelessWidget {
+  const AuditLogScreen({super.key});
+
+  static String auditSubtitle(String log) {
+    if (log.contains('MÔ PHỎNG') || log.contains('Mô phỏng')) {
+      return 'Mô phỏng (Simulation) • Dữ liệu kiểm thử';
+    }
+    if (log.contains('SOS')) {
+      return 'Sự kiện khẩn cấp SOS • Chống giả mạo & Replay Guard';
+    }
+    if (log.contains('TỪ CHỐI')) {
+      return 'Từ chối ủy quyền • Bảo vệ quyền riêng tư PII';
+    }
+    if (log.contains('ỦY QUYỀN') || log.contains('CHẤP THUẬN') || log.contains('Đồng ý')) {
+      return 'Ủy quyền truy cập • Xác thực Handshake 2 chiều';
+    }
+    if (log.contains('LỜI MỜI') || log.contains('YÊU CẦU') || log.contains('MÃ MỜI')) {
+      return 'Kết nối thành viên • Ghép đôi vòng tròn an toàn';
+    }
+    if (log.contains('XÁC THỰC') || log.contains('Keystore') || log.contains('X25519')) {
+      return 'Quản lý định danh • Android Keystore X25519';
+    }
+    if (log.contains('MÃ HÓA') || log.contains('E2EE')) {
+      return 'Mã hóa đầu cuối • ECDH X25519 & AES-256-GCM';
+    }
+    return 'Nhật ký bảo mật hệ thống';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = AppScope.read(context);
+
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) {
+        final auditLogs = appState.auditLogs;
 
         return Scaffold(
           appBar: AppBar(
@@ -1287,37 +2348,54 @@ class AuditLogScreen extends StatelessWidget {
             backgroundColor: Colors.white,
             elevation: 0,
           ),
-          body: ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: auditLogs.length,
-            separatorBuilder: (context, index) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final log = auditLogs[index];
-              final isSos = log.contains('SOS');
-              return ListTile(
-                leading: CircleAvatar(
-                  backgroundColor:
-                      isSos ? const Color(0xFFFFEBEE) : const Color(0xFFE3F2FD),
-                  foregroundColor:
-                      isSos ? const Color(0xFFE53935) : const Color(0xFF1E88E5),
-                  child: Icon(
-                    isSos ? Icons.warning_amber_rounded : Icons.history_rounded,
+          body: auditLogs.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.history_toggle_off_rounded, size: 64, color: Colors.grey),
+                        SizedBox(height: 12),
+                        Text(
+                          'Chưa có bản ghi nhật ký kiểm toán nào',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.black54),
+                        ),
+                      ],
+                    ),
                   ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: auditLogs.length,
+                  separatorBuilder: (context, index) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final log = auditLogs[index];
+                    final isSos = log.contains('SOS');
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor:
+                            isSos ? const Color(0xFFFFEBEE) : const Color(0xFFE3F2FD),
+                        foregroundColor:
+                            isSos ? const Color(0xFFE53935) : const Color(0xFF1E88E5),
+                        child: Icon(
+                          isSos ? Icons.warning_amber_rounded : Icons.history_rounded,
+                        ),
+                      ),
+                      title: Text(
+                        log,
+                        style: TextStyle(
+                          fontWeight: isSos ? FontWeight.bold : FontWeight.normal,
+                          color: isSos ? const Color(0xFFB71C1C) : const Color(0xFF18191F),
+                        ),
+                      ),
+                      subtitle: Text(
+                        auditSubtitle(log),
+                        style: const TextStyle(fontSize: 11.5),
+                      ),
+                    );
+                  },
                 ),
-                title: Text(
-                  log,
-                  style: TextStyle(
-                    fontWeight: isSos ? FontWeight.bold : FontWeight.normal,
-                    color: isSos ? const Color(0xFFB71C1C) : const Color(0xFF18191F),
-                  ),
-                ),
-                subtitle: const Text(
-                  'Xác thực chữ ký & mã hóa E2EE',
-                  style: TextStyle(fontSize: 11.5),
-                ),
-              );
-            },
-          ),
         );
       },
     );
@@ -1326,6 +2404,103 @@ class AuditLogScreen extends StatelessWidget {
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
+
+  void _showTestAccountDialog(BuildContext context, AppState state) {
+    final nameCtrl = TextEditingController(text: state.userProfile?.displayName ?? '');
+    final emailCtrl = TextEditingController(text: state.currentUserEmail ?? '');
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: 20,
+          bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 44,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Đăng nhập tài khoản kiểm thử',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Tự động sinh và nạp cặp khóa X25519 Keystore riêng biệt cho tài khoản này để kiểm thử đa tài khoản.',
+                style: TextStyle(fontSize: 12.5, color: Colors.black54),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: nameCtrl,
+                decoration: InputDecoration(
+                  labelText: 'Tên hiển thị',
+                  prefixIcon: const Icon(Icons.badge_outlined),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: emailCtrl,
+                decoration: InputDecoration(
+                  labelText: 'Email tài khoản',
+                  prefixIcon: const Icon(Icons.email_outlined),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton.icon(
+                  onPressed: () async {
+                    if (nameCtrl.text.trim().isEmpty || emailCtrl.text.trim().isEmpty) return;
+                    Navigator.pop(ctx);
+                    await state.signInWithTestAccount(
+                      email: emailCtrl.text.trim(),
+                      displayName: nameCtrl.text.trim(),
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ Đã đăng nhập: ${nameCtrl.text.trim()} (Keystore Active)'),
+                          backgroundColor: const Color(0xFF2E7D32),
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.key_rounded),
+                  label: const Text('Đăng nhập & Kích hoạt Keystore', style: TextStyle(fontWeight: FontWeight.bold)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2E7D32),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1510,6 +2685,31 @@ class ProfileScreen extends StatelessWidget {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 44,
+                        child: OutlinedButton.icon(
+                          onPressed: state.isAuthLoading
+                              ? null
+                              : () => _showTestAccountDialog(context, state),
+                          icon: const Icon(Icons.science_outlined, size: 19),
+                          label: const Text(
+                            'Đăng nhập tài khoản kiểm thử',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF2E7D32),
+                            side: const BorderSide(color: Color(0xFF2E7D32)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
           ),
@@ -1585,7 +2785,7 @@ class ProfileScreen extends StatelessWidget {
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   subtitle: const Text(
-                    'Xiaomi Redmi Note 11 (220333QAG)',
+                    'Thông tin thiết bị không khả dụng',
                     style: TextStyle(fontSize: 12),
                   ),
                   trailing: Container(
@@ -1862,12 +3062,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
     return AnimatedBuilder(
       animation: appState,
       builder: (context, _) {
-        final auditLogs = <String>[
-          ...appState.auditLogs,
-          '08:30 - Bố đã xem vị trí của bạn',
-          '09:15 - Mẹ đã xem vị trí của bạn',
-          '11:40 - Con đã xem vị trí của bạn',
-        ];
+        final auditLogs = appState.auditLogs;
         final TamperReport? tamper = appState.tamperReport;
 
         return Scaffold(
@@ -1889,8 +3084,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   'Bảo vệ Vòng tròn, Nhật ký & Tin nhắn (Bản đồ & SOS luôn mở khẩn cấp)',
                 ),
                 value: appState.sensitiveDataLockEnabled,
-                activeThumbColor: const Color(0xFFE53935),
-                activeTrackColor: const Color(0xFFF8BBD0),
+                activeThumbColor: Colors.white,
+                activeTrackColor: const Color(0xFF1E88E5),
+                inactiveThumbColor: Colors.white,
+                inactiveTrackColor: const Color(0xFFCBD5E1),
                 onChanged: (value) => appState.setSensitiveDataLock(value),
               ),
               const Divider(),
@@ -1904,8 +3101,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   'Bật FLAG_SECURE native để chặn chụp & quay màn hình',
                 ),
                 value: appState.flagSecureEnabled,
-                activeThumbColor: const Color(0xFFE53935),
-                activeTrackColor: const Color(0xFFF8BBD0),
+                activeThumbColor: Colors.white,
+                activeTrackColor: const Color(0xFF1E88E5),
+                inactiveThumbColor: Colors.white,
+                inactiveTrackColor: const Color(0xFFCBD5E1),
                 onChanged: (value) => appState.setFlagSecure(value),
               ),
               const Divider(),
@@ -1991,21 +3190,31 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                children: auditLogs
-                    .map(
-                      (log) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(Icons.access_time_filled, size: 16, color: Color(0xFF607D8B)),
-                            const SizedBox(width: 8),
-                            Expanded(child: Text(log)),
-                          ],
+                children: auditLogs.isEmpty
+                    ? const [
+                        Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Text(
+                            'Chưa có sự kiện nào trong nhật ký kiểm toán.',
+                            style: TextStyle(fontSize: 12, color: Colors.black54),
+                          ),
                         ),
-                      ),
-                    )
-                    .toList(),
+                      ]
+                    : auditLogs
+                        .map(
+                          (log) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(Icons.access_time_filled, size: 16, color: Color(0xFF607D8B)),
+                                const SizedBox(width: 8),
+                                Expanded(child: Text(log)),
+                              ],
+                            ),
+                          ),
+                        )
+                        .toList(),
               ),
             ],
           ),

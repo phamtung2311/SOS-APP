@@ -1,20 +1,32 @@
+import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:sos_safe_family/core/app_state.dart';
 import 'package:sos_safe_family/data/models/chat_message.dart';
+import 'package:sos_safe_family/data/services/auth_service.dart';
 import 'package:sos_safe_family/data/services/crypto_service.dart';
+import 'package:sos_safe_family/data/services/secure_storage_service.dart';
 import 'package:uuid/uuid.dart';
 
 /// Màn hình nhắn tin bảo mật E2EE với một thành viên gia đình.
 ///
 /// Mọi tin nhắn đều được mã hóa AES-256-GCM bằng khóa phiên thỏa thuận qua
-/// ECDH X25519 trước khi "đi trên đường truyền". Nút **Soi mật mã** cho phép
+/// ECDH X25519 giữa hai bên trước khi "đi trên đường truyền". Nút **Soi mật mã** cho phép
 /// trình diễn trực tiếp plaintext ↔ ciphertext để phục vụ báo cáo đồ án.
 class FamilyChatScreen extends StatefulWidget {
-  const FamilyChatScreen({super.key, required this.memberName});
+  const FamilyChatScreen({
+    super.key,
+    required this.memberName,
+    this.peerEmail,
+    this.memberId,
+  });
 
   final String memberName;
+  final String? peerEmail;
+  final String? memberId;
 
   @override
   State<FamilyChatScreen> createState() => _FamilyChatScreenState();
@@ -22,14 +34,25 @@ class FamilyChatScreen extends StatefulWidget {
 
 class _FamilyChatScreenState extends State<FamilyChatScreen> {
   final CryptoService _crypto = CryptoService();
+  final SecureStorageService _storage = SecureStorageService();
   final ImagePicker _picker = ImagePicker();
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<ChatMessage> _messages = [];
 
-  /// Khóa phiên dùng chung cho cả hai chiều (mô phỏng khóa đã thỏa thuận
-  /// qua ECDH X25519 ngoài đời thực).
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _chatSub;
+  String _chatId = '';
+  String? _myEmail;
+  String? _myUid;
+  String _myName = 'Tôi';
+
+  /// Khóa phiên dùng chung cho cả hai chiều (thỏa thuận AES-256-GCM E2EE hoặc fallback demo).
   Uint8List? _sharedKey;
+
+  /// Cờ xác định phiên chat có dùng khóa E2EE thật hay chế độ demo fallback.
+  bool _isE2EE = false;
+  bool _isLoading = true;
+  bool _hasConnectionError = false;
 
   bool _isInspectorEnabled = true;
   bool _isSending = false;
@@ -37,131 +60,245 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
   @override
   void initState() {
     super.initState();
-    _bootstrap();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bootstrap();
+    });
   }
 
   @override
   void dispose() {
+    _chatSub?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  /// Thiết lập khóa phiên và nạp sẵn vài tin nhắn mẫu.
+  /// Thiết lập khóa phiên phòng chat và lắng nghe tin nhắn Firestore.
+  ///
+  /// Quy trình thỏa thuận khóa E2EE thật:
+  /// 1. Lấy `publicKey` của đối phương (peer) từ Firestore collection `users/{peerUid}`.
+  /// 2. Nạp khóa bí mật của chính mình từ Android Keystore (SecureStorage).
+  /// 3. Thực hiện ECDH X25519 + HKDF-SHA256 để sinh ra cùng 1 khóa phiên AES-256.
+  /// 4. Nếu thiếu peer key hoặc chưa đăng nhập: Fallback về `deriveRoomKey` và gán `_isE2EE = false`.
   Future<void> _bootstrap() async {
-    final service = CryptoService();
-    final alice = await service.generateKeyPairX25519();
-    final bob = await service.generateKeyPairX25519();
+    UserSecurityProfile? user;
+    try {
+      final appState = AppScope.read(context);
+      user = appState.userProfile;
+      _myEmail = user?.email;
+      _myUid = user?.uid;
+      _myName = user?.displayName ?? 'Tôi';
+    } catch (_) {}
 
-    final shared = await service.deriveSharedKey(
-      myKeyPair: alice,
-      theirPublicKey: await service.importPublicKey(
-        await service.exportPublicKey(bob),
-      ),
-    );
+    final myE = (_myEmail ?? 'user_a').trim().toLowerCase();
+    final peerE = (widget.peerEmail ?? widget.memberName).trim().toLowerCase();
+    final sorted = [myE, peerE]..sort();
+    _chatId = 'chat_${sorted[0].replaceAll(RegExp(r'[^a-z0-9]'), '_')}___${sorted[1].replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
 
-    final keyBytes = Uint8List.fromList(await shared.extractBytes());
-    if (!mounted) return;
-    setState(() => _sharedKey = keyBytes);
+    // 1. Thử truy vấn Public Key của peer từ Cloud Firestore
+    String? peerPublicKeyB64;
+    try {
+      if (widget.memberId != null && widget.memberId!.isNotEmpty) {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(widget.memberId)
+            .get();
+        if (doc.exists && doc.data() != null) {
+          peerPublicKeyB64 = doc.data()!['publicKey'] as String?;
+        }
+      }
 
-    await _seedMessages(keyBytes);
-  }
+      if (peerPublicKeyB64 == null && widget.peerEmail != null && widget.peerEmail!.isNotEmpty) {
+        final query = await FirebaseFirestore.instance
+            .collection('users')
+            .where('email', isEqualTo: widget.peerEmail!.trim().toLowerCase())
+            .limit(1)
+            .get();
+        if (query.docs.isNotEmpty) {
+          peerPublicKeyB64 = query.docs.first.data()['publicKey'] as String?;
+        }
+      }
 
-  /// Tạo sẵn 4 tin nhắn mẫu (cả text và ảnh) để app sinh động ngay khi mở.
-  Future<void> _seedMessages(Uint8List key) async {
-    final seeds = <ChatMessage>[];
-
-    Future<ChatMessage> makeText({
-      required String from,
-      required String name,
-      required String text,
-      required int minutesAgo,
-    }) async {
-      final payload = await _crypto.encryptTextMessage(text, key);
-      return ChatMessage(
-        id: const Uuid().v4(),
-        senderId: from,
-        senderName: name,
-        timestamp: DateTime.now().subtract(Duration(minutes: minutesAgo)),
-        type: MessageType.text,
-        plaintext: text,
-        ciphertextBase64: payload.ciphertextBase64,
-        nonceBase64: payload.nonceBase64,
-        macBase64: payload.macBase64,
-      );
+      if (peerPublicKeyB64 == null && widget.memberName.isNotEmpty) {
+        final query = await FirebaseFirestore.instance
+            .collection('users')
+            .where('displayName', isEqualTo: widget.memberName.trim())
+            .limit(1)
+            .get();
+        if (query.docs.isNotEmpty) {
+          peerPublicKeyB64 = query.docs.first.data()['publicKey'] as String?;
+        }
+      }
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Lỗi truy vấn Firestore lấy peer key: $e');
     }
 
-    Future<ChatMessage> makeImage({
-      required String from,
-      required String name,
-      required int minutesAgo,
-      required Color color,
-      required IconData icon,
-    }) async {
-      // Tạo một ảnh demo đơn giản (PNG 1x1 màu) rồi mã hóa như ảnh thật.
-      final bytes = await _demoImageBytes(color, icon);
-      final payload = await _crypto.encryptMediaBytes(bytes, key);
-      return ChatMessage(
-        id: const Uuid().v4(),
-        senderId: from,
-        senderName: name,
-        timestamp: DateTime.now().subtract(Duration(minutes: minutesAgo)),
-        type: MessageType.image,
-        plaintext: '[Hình ảnh]',
-        ciphertextBase64: payload.ciphertextBase64,
-        nonceBase64: payload.nonceBase64,
-        macBase64: payload.macBase64,
-        decryptedImageBytes: bytes,
-      );
+    // 2. Thỏa thuận khóa E2EE ECDH X25519 với khóa bí mật trong Keystore
+    Uint8List? keyBytes;
+    bool isE2eeSuccess = false;
+
+    if (peerPublicKeyB64 != null && peerPublicKeyB64.isNotEmpty && _myUid != null) {
+      try {
+        final privB64 = await _storage.getUserPrivateKey(_myUid!);
+        final pubB64 = user?.publicKeyB64 ?? await _storage.getUserPublicKey(_myUid!);
+        if (privB64 != null && pubB64 != null) {
+          final myKeyPair = await _crypto.importKeyPair(
+            privateKeyB64: privB64,
+            publicKeyB64: pubB64,
+          );
+          keyBytes = await _crypto.deriveChatKeyForPeer(
+            myKeyPair: myKeyPair,
+            theirPublicKeyB64: peerPublicKeyB64,
+          );
+          isE2eeSuccess = true;
+          debugPrint('[FamilyChatScreen] ✅ Thiết lập khóa E2EE ECDH X25519 thành công.');
+        }
+      } catch (e) {
+        debugPrint('[FamilyChatScreen] Lỗi thỏa thuận ECDH X25519: $e');
+      }
     }
 
-    seeds.add(await makeText(
-      from: 'other',
-      name: widget.memberName,
-      text: 'Con ơi, con về nhà chưa? Mẹ lo lắng quá.',
-      minutesAgo: 12,
-    ));
-    seeds.add(await makeText(
-      from: 'me',
-      name: 'Tôi',
-      text: 'Con về rồi, đang trên đường về mẹ.',
-      minutesAgo: 11,
-    ));
-    seeds.add(await makeImage(
-      from: 'other',
-      name: widget.memberName,
-      minutesAgo: 10,
-      color: const Color(0xFF43A047),
-      icon: Icons.home_rounded,
-    ));
-    seeds.add(await makeText(
-      from: 'other',
-      name: widget.memberName,
-      text: 'Tối nay về sớm nhé, mẹ nấu món con thích.',
-      minutesAgo: 9,
-    ));
+    // 3. Thiếu peer key hoặc ngoại lệ -> Fallback deriveRoomKey
+    if (!isE2eeSuccess || keyBytes == null) {
+      keyBytes = await _crypto.deriveRoomKey(_chatId);
+      isE2eeSuccess = false;
+      debugPrint('[FamilyChatScreen] ⚠️ Thiếu peer key -> Fallback deriveRoomKey (demo)');
+    }
 
     if (!mounted) return;
-    setState(() => _messages.addAll(seeds));
+    setState(() {
+      _sharedKey = keyBytes;
+      _isE2EE = isE2eeSuccess;
+      _isLoading = true;
+      _hasConnectionError = false;
+    });
+
+    _listenToMessages(keyBytes);
   }
 
-  /// Sinh bytes PNG demo (không cần package ảnh: dùng PNG 1x1 base64 cố định
-  /// rồi chèn màu) — chỉ để minh hoạ luồng mã hóa ảnh.
-  Future<Uint8List> _demoImageBytes(Color color, IconData icon) async {
-    // PNG 1x1 đen tối giản lập "ảnh", đủ để demo mã hóa/giải mã nhị phân.
-    const png1x1 = <int>[
-      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-      0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
-      0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
-      0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00,
-      0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
-    return Uint8List.fromList(png1x1);
+  /// Lắng nghe các tin nhắn mã hóa thời gian thực từ Firestore và giải mã E2EE.
+  void _listenToMessages(Uint8List key) {
+    _chatSub?.cancel();
+    try {
+      _chatSub = FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .orderBy('createdAt', descending: false)
+          .snapshots()
+          .listen((snapshot) async {
+        final List<ChatMessage> loaded = [];
+        for (final doc in snapshot.docs) {
+          final d = doc.data();
+          final senderEmail = (d['senderEmail'] as String? ?? '').toLowerCase().trim();
+          final senderId = d['senderId'] as String? ?? '';
+          final senderName = d['senderName'] as String? ?? widget.memberName;
+          final isMine = (senderEmail.isNotEmpty && senderEmail == _myEmail?.toLowerCase().trim()) ||
+              (senderId.isNotEmpty && (senderId == _myUid || senderId == 'me'));
+
+          final cipherB64 = d['ciphertextBase64'] as String? ?? '';
+          final nonceB64 = d['nonceBase64'] as String? ?? '';
+          final macB64 = d['macBase64'] as String? ?? '';
+          final typeStr = d['type'] as String? ?? 'text';
+          final type = typeStr == 'image' ? MessageType.image : MessageType.text;
+
+          // Kiểm tra xem tin nhắn này đã có trong bộ nhớ RAM local chưa để tránh giải mã lại
+          final existingIndex = _messages.indexWhere((m) => m.id == doc.id);
+          String? text;
+          Uint8List? imgBytes;
+          if (existingIndex != -1) {
+            text = _messages[existingIndex].plaintext;
+            imgBytes = _messages[existingIndex].decryptedImageBytes;
+          }
+
+          if (text == null || (type == MessageType.image && imgBytes == null)) {
+            if (cipherB64.isNotEmpty && nonceB64.isNotEmpty && macB64.isNotEmpty) {
+              try {
+                if (type == MessageType.text) {
+                  text = await _crypto.decryptTextMessage(
+                    EncryptedPayload.fromBase64(
+                      ciphertextBase64: cipherB64,
+                      nonceBase64: nonceB64,
+                      macBase64: macB64,
+                    ),
+                    key,
+                  );
+                } else {
+                  imgBytes = await _crypto.decryptMediaBytes(
+                    EncryptedPayload.fromBase64(
+                      ciphertextBase64: cipherB64,
+                      nonceBase64: nonceB64,
+                      macBase64: macB64,
+                    ),
+                    key,
+                  );
+                  text = '[Hình ảnh]';
+                }
+              } catch (e) {
+                debugPrint('[FamilyChatScreen] Lỗi giải mã: $e');
+                text = '[Không thể giải mã: Sai khóa E2EE]';
+              }
+            } else {
+              text = (d['plaintext'] as String?) ?? '';
+            }
+          }
+
+          final ts = d['createdAt'] as Timestamp?;
+          final time = ts?.toDate() ?? DateTime.now();
+
+          loaded.add(ChatMessage(
+            id: doc.id,
+            senderId: isMine ? 'me' : 'other',
+            senderName: isMine ? 'Tôi' : senderName,
+            timestamp: time,
+            type: type,
+            plaintext: text,
+            ciphertextBase64: cipherB64,
+            nonceBase64: nonceB64,
+            macBase64: macB64,
+            decryptedImageBytes: imgBytes,
+            isEncrypted: _isE2EE,
+            status: MessageStatus.sent,
+          ));
+        }
+
+        // Giữ lại các tin local đang pending/failed chưa được đồng bộ lên Firestore
+        final pending = _messages.where((m) =>
+            (m.status == MessageStatus.failed || m.status == MessageStatus.sending) &&
+            !loaded.any((l) => l.id == m.id)).toList();
+
+        if (mounted) {
+          setState(() {
+            _messages.clear();
+            _messages.addAll(loaded);
+            _messages.addAll(pending);
+            _isLoading = false;
+            _hasConnectionError = false;
+          });
+          _scrollToBottom();
+        }
+      }, onError: (e) {
+        debugPrint('[FamilyChatScreen] Firestore offline: $e');
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _hasConnectionError = true;
+          });
+        }
+      });
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Firestore init error: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _hasConnectionError = true;
+        });
+      }
+    }
   }
 
   // ---------------------------------------------------------------------
-  // Gửi tin nhắn
+  // Gửi tin nhắn E2EE (Không gửi plaintext lên Firestore)
   // ---------------------------------------------------------------------
 
   Future<void> _sendText() async {
@@ -169,30 +306,68 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     final key = _sharedKey;
     if (text.isEmpty || key == null || _isSending) return;
 
-    setState(() => _isSending = true);
     _inputController.clear();
 
     final payload = await _crypto.encryptTextMessage(text, key);
-    final message = ChatMessage(
-      id: const Uuid().v4(),
+    final msgId = const Uuid().v4();
+
+    // Plaintext chỉ lưu trong RAM local của thiết bị
+    final localMsg = ChatMessage(
+      id: msgId,
       senderId: 'me',
-      senderName: 'Tôi',
+      senderName: _myName,
       timestamp: DateTime.now(),
       type: MessageType.text,
       plaintext: text,
       ciphertextBase64: payload.ciphertextBase64,
       nonceBase64: payload.nonceBase64,
       macBase64: payload.macBase64,
+      isEncrypted: _isE2EE,
+      status: MessageStatus.sending,
     );
 
-    // Mô phỏng độ trễ gửi qua mạng.
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    if (!mounted) return;
     setState(() {
-      _messages.add(message);
-      _isSending = false;
+      _messages.add(localMsg);
+      _isSending = true;
     });
     _scrollToBottom();
+
+    try {
+      final docMap = localMsg.toFirestoreMap(
+        senderEmail: _myEmail ?? '',
+        createdAt: FieldValue.serverTimestamp(),
+      );
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .doc(msgId)
+          .set(docMap);
+
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == msgId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sent);
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Firestore send error: $e');
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == msgId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.failed);
+          }
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+        _scrollToBottom();
+      }
+    }
   }
 
   Future<void> _pickAndSendImage() async {
@@ -209,15 +384,16 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     final rawBytes = await picked.readAsBytes();
     if (!mounted) return;
 
-    // Mô phỏng xóa EXIF: trong ứng dụng thật dùng thư viện strip metadata
-    // hoặc render lại ảnh qua canvas trước khi mã hóa.
+    // Loại bỏ EXIF metadata để bảo vệ quyền riêng tư vị trí khi gửi ảnh
     final sanitized = _stripExif(rawBytes);
-
     final payload = await _crypto.encryptMediaBytes(sanitized, key);
-    final message = ChatMessage(
-      id: const Uuid().v4(),
+    final msgId = const Uuid().v4();
+
+    // Plaintext / ảnh gốc chỉ lưu trong RAM local
+    final localMsg = ChatMessage(
+      id: msgId,
       senderId: 'me',
-      senderName: 'Tôi',
+      senderName: _myName,
       timestamp: DateTime.now(),
       type: MessageType.image,
       plaintext: '[Hình ảnh]',
@@ -226,11 +402,93 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       macBase64: payload.macBase64,
       localImagePath: picked.path,
       decryptedImageBytes: sanitized,
+      isEncrypted: _isE2EE,
+      status: MessageStatus.sending,
     );
 
-    if (!mounted) return;
-    setState(() => _messages.add(message));
+    setState(() {
+      _messages.add(localMsg);
+    });
     _scrollToBottom();
+
+    try {
+      final docMap = localMsg.toFirestoreMap(
+        senderEmail: _myEmail ?? '',
+        createdAt: FieldValue.serverTimestamp(),
+      );
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .doc(msgId)
+          .set(docMap);
+
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == msgId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sent);
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Gửi ảnh Firestore error: $e');
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == msgId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.failed);
+          }
+        });
+      }
+    } finally {
+      if (mounted) _scrollToBottom();
+    }
+  }
+
+  /// Thử gửi lại tin nhắn bị lỗi
+  Future<void> _retrySendMessage(ChatMessage failedMsg) async {
+    final key = _sharedKey;
+    if (key == null) return;
+
+    setState(() {
+      final idx = _messages.indexWhere((m) => m.id == failedMsg.id);
+      if (idx != -1) {
+        _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sending);
+      }
+    });
+
+    try {
+      final docMap = failedMsg.toFirestoreMap(
+        senderEmail: _myEmail ?? '',
+        createdAt: FieldValue.serverTimestamp(),
+      );
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .doc(failedMsg.id)
+          .set(docMap);
+
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == failedMsg.id);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sent);
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('[FamilyChatScreen] Retry write error: $e');
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == failedMsg.id);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.failed);
+          }
+        });
+      }
+    }
   }
 
   /// Loại bỏ vùng dữ liệu EXIF (APP1) ở đầu file JPEG.
@@ -315,7 +573,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                     width: 12,
                     height: 12,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF43A047),
+                      color: _isE2EE ? const Color(0xFF43A047) : const Color(0xFFE65100),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white, width: 2),
                     ),
@@ -337,13 +595,22 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                       color: Color(0xFF18191F),
                     ),
                   ),
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.lock_rounded, size: 12, color: Color(0xFF43A047)),
-                      SizedBox(width: 4),
+                      Icon(
+                        _isE2EE ? Icons.lock_rounded : Icons.lock_open_rounded,
+                        size: 12,
+                        color: _isE2EE ? const Color(0xFF43A047) : const Color(0xFFE65100),
+                      ),
+                      const SizedBox(width: 4),
                       Text(
-                        'E2EE: AES-256-GCM / Khóa 256-bit',
-                        style: TextStyle(fontSize: 11.5, color: Color(0xFF43A047)),
+                        _isE2EE
+                            ? 'E2EE: ECDH X25519 / AES-256-GCM'
+                            : 'Chưa thiết lập khóa E2EE – chế độ demo',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: _isE2EE ? const Color(0xFF43A047) : const Color(0xFFE65100),
+                        ),
                       ),
                     ],
                   ),
@@ -380,45 +647,154 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       ),
       body: Column(
         children: [
-          // Security info banner
-          Container(
-            width: double.infinity,
-            color: const Color(0xFFE8F5E9),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            child: const Row(
-              children: [
-                Icon(Icons.lock_rounded, size: 16, color: Color(0xFF2E7D32)),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '🔒 Nội dung và hình ảnh được mã hóa đầu cuối. Kẻ trung gian trên đường truyền chỉ thấy chuỗi mã hóa vô nghĩa.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.35,
-                      color: Color(0xFF2E7D32),
+          // Security / Warning info banner ở đầu hội thoại
+          if (!_isE2EE)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFFFFF3E0),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: const Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFE65100)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Chưa thiết lập khóa E2EE – chế độ demo',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        height: 1.35,
+                        color: Color(0xFFE65100),
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
-          // Messages
-          Expanded(
-            child: _messages.isEmpty
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = _messages[index];
-                      return _MessageBubble(
-                        message: msg,
-                        onTap: () => _openInspector(msg),
-                      );
-                    },
+                ],
+              ),
+            )
+          else
+            Container(
+              width: double.infinity,
+              color: const Color(0xFFE8F5E9),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: const Row(
+                children: [
+                  Icon(Icons.lock_rounded, size: 16, color: Color(0xFF2E7D32)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '🔒 Nội dung và hình ảnh được mã hóa đầu cuối (E2EE X25519). Kẻ trung gian trên đường truyền chỉ thấy chuỗi mã hóa vô nghĩa.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.35,
+                        color: Color(0xFF2E7D32),
+                      ),
+                    ),
                   ),
+                ],
+              ),
+            ),
+
+          // Messages View
+          Expanded(
+            child: _isLoading && _messages.isEmpty && !_hasConnectionError
+                ? const Center(child: CircularProgressIndicator())
+                : _hasConnectionError && _messages.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.cloud_off_rounded,
+                                size: 54,
+                                color: Colors.grey.shade400,
+                              ),
+                              const SizedBox(height: 12),
+                              const Text(
+                                'Không kết nối được máy chủ',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF37474F),
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'Vui lòng kiểm tra lại kết nối mạng và thử lại.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                              ),
+                              const SizedBox(height: 16),
+                              ElevatedButton.icon(
+                                onPressed: () {
+                                  setState(() {
+                                    _isLoading = true;
+                                    _hasConnectionError = false;
+                                  });
+                                  _bootstrap();
+                                },
+                                icon: const Icon(Icons.refresh_rounded, size: 18),
+                                label: const Text('Thử lại'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF1E88E5),
+                                  foregroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : _messages.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.chat_bubble_outline_rounded,
+                                  size: 54,
+                                  color: Colors.grey.shade300,
+                                ),
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'Chưa có tin nhắn nào',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF546E7A),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Hãy gửi tin nhắn đầu tiên để bắt đầu trò chuyện',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.grey.shade500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                            itemCount: _messages.length,
+                            itemBuilder: (context, index) {
+                              final msg = _messages[index];
+                              return _MessageBubble(
+                                message: msg,
+                                onTap: () => _openInspector(msg),
+                                onRetry: msg.status == MessageStatus.failed
+                                    ? () => _retrySendMessage(msg)
+                                    : null,
+                              );
+                            },
+                          ),
           ),
+
           // Input bar
           _buildInputBar(),
         ],
@@ -492,10 +868,15 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
 
 /// Bong bóng chat: căn phải cho tin của "Tôi", căn trái cho tin của thành viên.
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.onTap});
+  const _MessageBubble({
+    required this.message,
+    required this.onTap,
+    this.onRetry,
+  });
 
   final ChatMessage message;
   final VoidCallback onTap;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -525,7 +906,7 @@ class _MessageBubble extends StatelessWidget {
             onTap: onTap,
             child: Container(
               constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.72,
+                maxWidth: MediaQuery.of(context).size.width * 0.75,
               ),
               padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
               decoration: BoxDecoration(
@@ -560,27 +941,87 @@ class _MessageBubble extends StatelessWidget {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        Icons.lock_rounded,
-                        size: 11,
-                        color: isMine ? Colors.white70 : Colors.grey.shade500,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        'Đã xác thực E2EE',
-                        style: TextStyle(
-                          fontSize: 10,
+                      if (message.status == MessageStatus.failed) ...[
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          size: 13,
+                          color: Color(0xFFFFCDD2),
+                        ),
+                        const SizedBox(width: 3),
+                        const Text(
+                          'Gửi thất bại',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFFFCDD2),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (onRetry != null)
+                          InkWell(
+                            onTap: onRetry,
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.refresh_rounded, size: 11, color: Colors.white),
+                                  SizedBox(width: 2),
+                                  Text(
+                                    'Thử gửi lại',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.white,
+                                      decoration: TextDecoration.underline,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ] else if (message.status == MessageStatus.sending) ...[
+                        SizedBox(
+                          width: 10,
+                          height: 10,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              isMine ? Colors.white70 : Colors.grey.shade500,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Đang gửi…',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isMine ? Colors.white70 : Colors.grey.shade500,
+                          ),
+                        ),
+                      ] else ...[
+                        Icon(
+                          message.isEncrypted ? Icons.lock_rounded : Icons.lock_open_rounded,
+                          size: 11,
                           color: isMine ? Colors.white70 : Colors.grey.shade500,
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _formatTime(message.timestamp),
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: isMine ? Colors.white70 : Colors.grey.shade400,
+                        const SizedBox(width: 3),
+                        Text(
+                          message.isEncrypted ? 'Đã xác thực E2EE' : 'Chế độ demo',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isMine ? Colors.white70 : Colors.grey.shade500,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _formatTime(message.timestamp),
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isMine ? Colors.white70 : Colors.grey.shade400,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ],

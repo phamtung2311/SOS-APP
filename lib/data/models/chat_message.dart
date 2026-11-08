@@ -3,6 +3,10 @@ import 'dart:typed_data';
 /// Loại nội dung của một tin nhắn.
 enum MessageType { text, image }
 
+/// Trạng thái gửi của tin nhắn trong khung chat.
+enum MessageStatus { sending, sent, failed }
+typedef ChatMessageStatus = MessageStatus;
+
 /// Một tin nhắn trong khung chat E2EE.
 ///
 /// Vòng đời dữ liệu của một tin nhắn:
@@ -25,6 +29,7 @@ class ChatMessage {
     this.localImagePath,
     this.decryptedImageBytes,
     this.isEncrypted = true,
+    this.status = MessageStatus.sent,
   });
 
   /// UUID định danh tin nhắn.
@@ -60,6 +65,9 @@ class ChatMessage {
   /// Cờ cho biết tin nhắn đã được mã hóa E2EE.
   final bool isEncrypted;
 
+  /// Trạng thái gửi của tin nhắn: sending (đang gửi), sent (thành công), failed (lỗi).
+  final MessageStatus status;
+
   bool get isMine => senderId == 'me';
 
   /// Rút gọn ciphertext để hiển thị trong Crypto Inspector.
@@ -68,6 +76,36 @@ class ChatMessage {
     if (c.length <= 48) return c;
     return '${c.substring(0, 24)}\n...\n${c.substring(c.length - 24)}';
   }
+
+  /// Chuyển đổi dữ liệu tin nhắn thành Map để lưu vào Cloud Firestore.
+  ///
+  /// TUYỆT ĐỐI KHÔNG chứa trường 'plaintext' hay dữ liệu thô 'decryptedImageBytes'
+  /// để đảm bảo máy chủ trung gian không thể đọc được nội dung tin nhắn.
+  Map<String, dynamic> toFirestoreMap({
+    String? senderEmail,
+    dynamic createdAt,
+  }) {
+    final map = <String, dynamic>{
+      'senderId': senderId,
+      'senderName': senderName,
+      'type': type == MessageType.image ? 'image' : 'text',
+      'ciphertextBase64': ciphertextBase64 ?? '',
+      'nonceBase64': nonceBase64 ?? '',
+      'macBase64': macBase64 ?? '',
+      'createdAt': createdAt,
+    };
+    if (senderEmail != null) {
+      map['senderEmail'] = senderEmail;
+    }
+    return map;
+  }
+
+  /// Hàm serialize alias cho [toFirestoreMap] dùng trong kiểm thử và tích hợp.
+  Map<String, dynamic> serializeForFirestore({
+    String? senderEmail,
+    dynamic createdAt,
+  }) =>
+      toFirestoreMap(senderEmail: senderEmail, createdAt: createdAt);
 
   ChatMessage copyWith({
     String? id,
@@ -82,6 +120,7 @@ class ChatMessage {
     String? localImagePath,
     Uint8List? decryptedImageBytes,
     bool? isEncrypted,
+    MessageStatus? status,
   }) {
     return ChatMessage(
       id: id ?? this.id,
@@ -96,6 +135,7 @@ class ChatMessage {
       localImagePath: localImagePath ?? this.localImagePath,
       decryptedImageBytes: decryptedImageBytes ?? this.decryptedImageBytes,
       isEncrypted: isEncrypted ?? this.isEncrypted,
+      status: status ?? this.status,
     );
   }
 }

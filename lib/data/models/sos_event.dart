@@ -34,7 +34,7 @@ class SosEvent {
     required this.lat,
     required this.lng,
     required this.isMocked,
-    required this.batteryLevel,
+    this.batteryLevel,
     required this.timestamp,
     this.status = SosStatus.active,
     this.resolvedAt,
@@ -55,8 +55,8 @@ class SosEvent {
   /// Vị trí có bị phát hiện là GPS giả mạo hay không.
   final bool isMocked;
 
-  /// Mức pin (0–100) tại thời điểm kích hoạt.
-  final int batteryLevel;
+  /// Mức pin (0–100) tại thời điểm kích hoạt (null nếu không khả dụng).
+  final int? batteryLevel;
 
   /// Thời điểm kích hoạt sự kiện.
   final DateTime timestamp;
@@ -72,7 +72,7 @@ class SosEvent {
 
   /// Đóng gói sự kiện thành payload JSON để mã hóa.
   ///
-  /// Khóa: `sosId`, `senderName`, `lat`, `lng`, `isMocked`, `batteryLevel`,
+  /// Khóa: `sosId`, `senderName`, `lat`, `lng`, `isMocked`, `batteryLevel` (tùy chọn),
   /// `timestamp`, `status`.
   Map<String, dynamic> toJson() => {
         'sosId': sosId,
@@ -80,7 +80,7 @@ class SosEvent {
         'lat': lat,
         'lng': lng,
         'isMocked': isMocked,
-        'batteryLevel': batteryLevel,
+        if (batteryLevel != null) 'batteryLevel': batteryLevel,
         'timestamp': timestamp.millisecondsSinceEpoch,
         'status': status.wireName,
         if (resolvedAt != null)
@@ -94,7 +94,7 @@ class SosEvent {
       lat: (json['lat'] as num?)?.toDouble() ?? 0.0,
       lng: (json['lng'] as num?)?.toDouble() ?? 0.0,
       isMocked: json['isMocked'] as bool? ?? false,
-      batteryLevel: (json['batteryLevel'] as num?)?.toInt() ?? 0,
+      batteryLevel: (json['batteryLevel'] as num?)?.toInt(),
       timestamp: DateTime.fromMillisecondsSinceEpoch(
         (json['timestamp'] as num?)?.toInt() ?? 0,
       ),
