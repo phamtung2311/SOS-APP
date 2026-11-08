@@ -68,6 +68,35 @@ class SecureStorageService {
     return _storage.read(key: 'pin');
   }
 
+  // ---------------------------------------------------------------------------
+  // Thời gian xác thực sinh trắc học gần nhất (Session TTL 7 ngày)
+  // ---------------------------------------------------------------------------
+
+  Future<void> saveLastBiometricAuthTime(DateTime time) async {
+    try {
+      await _storage.write(
+        key: 'last_biometric_auth_time',
+        value: time.toIso8601String(),
+      );
+    } catch (_) {}
+  }
+
+  Future<DateTime?> getLastBiometricAuthTime() async {
+    try {
+      final str = await _storage.read(key: 'last_biometric_auth_time');
+      if (str == null || str.isEmpty) return null;
+      return DateTime.tryParse(str);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> clearLastBiometricAuthTime() async {
+    try {
+      await _storage.delete(key: 'last_biometric_auth_time');
+    } catch (_) {}
+  }
+
   Future<void> clearAll() async {
     await _storage.deleteAll();
   }

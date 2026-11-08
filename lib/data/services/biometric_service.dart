@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:sos_safe_family/data/services/secure_storage_service.dart';
 
 /// Kết quả của một lần xác thực sinh trắc học.
 enum BiometricResult {
@@ -24,25 +25,56 @@ enum BiometricResult {
 /// nút SOS — nó chỉ được gọi khi người dùng truy cập gia đình, tin nhắn hoặc
 /// nhật ký di chuyển.
 ///
-/// Trạng thái mở khoá được quản lý theo phiên làm việc: sau một lần quét
-/// thành công, người dùng không bị hỏi lại liên tục. Khoá lại khi:
-///  - ứng dụng bị đưa vào background quá [sessionTimeout], hoặc
-///  - người dùng chủ động khoá (`lock()`).
+/// Trạng thái mở khoá được duy trì an toàn trong **7 ngày (1 tuần)**: sau một lần
+/// quét thành công, người dùng không bị hỏi lại liên tục. Khoá lại khi:
+///  - phiên mở khóa quá [sessionTimeout] (7 ngày), hoặc
+///  - người dùng đăng xuất / chủ động khoá (`lock()`).
 class BiometricService extends ChangeNotifier {
-  BiometricService({LocalAuthentication? localAuthentication})
-      : _localAuth = localAuthentication ?? LocalAuthentication();
+  BiometricService({
+    LocalAuthentication? localAuthentication,
+    SecureStorageService? secureStorage,
+  })  : _localAuth = localAuthentication ?? LocalAuthentication(),
+        _storage = secureStorage ?? SecureStorageService() {
+    _initPersistedSession();
+  }
 
   final LocalAuthentication _localAuth;
+  final SecureStorageService _storage;
 
-  /// Thời gian tối đa được phép ở lại trạng thái "đã mở khoá" sau khi app bị
-  /// đưa vào background.
-  static const Duration sessionTimeout = Duration(minutes: 1);
+  /// Thời gian tối đa duy trì trạng thái "đã mở khoá" (1 tuần = 7 ngày).
+  static const Duration sessionTimeout = Duration(days: 7);
 
   bool _unlockedThisSession = false;
   DateTime? _lastAuthenticatedAt;
 
-  /// Người dùng đã xác thực thành công trong phiên làm việc hiện tại.
-  bool get isUnlockedThisSession => _unlockedThisSession;
+  Future<void> _initPersistedSession() async {
+    try {
+      final last = await _storage.getLastBiometricAuthTime();
+      if (last != null) {
+        if (DateTime.now().difference(last) < sessionTimeout) {
+          _unlockedThisSession = true;
+          _lastAuthenticatedAt = last;
+          notifyListeners();
+        } else {
+          await _storage.clearLastBiometricAuthTime();
+        }
+      }
+    } catch (e) {
+      debugPrint('[BiometricService] initPersistedSession skipped: $e');
+    }
+  }
+
+  /// Người dùng đã xác thực thành công và còn trong thời hạn 7 ngày.
+  bool get isUnlockedThisSession {
+    if (!_unlockedThisSession) return false;
+    final last = _lastAuthenticatedAt;
+    if (last == null) return false;
+    if (DateTime.now().difference(last) >= sessionTimeout) {
+      _unlockedThisSession = false;
+      return false;
+    }
+    return true;
+  }
 
   /// Thời điểm xác thực thành công gần nhất.
   DateTime? get lastAuthenticatedAt => _lastAuthenticatedAt;
@@ -90,8 +122,12 @@ class BiometricService extends ChangeNotifier {
         persistAcrossBackgrounding: true,
       );
       if (ok) {
+        final now = DateTime.now();
         _unlockedThisSession = true;
-        _lastAuthenticatedAt = DateTime.now();
+        _lastAuthenticatedAt = now;
+        try {
+          await _storage.saveLastBiometricAuthTime(now);
+        } catch (_) {}
         notifyListeners();
         return BiometricResult.success;
       }
@@ -115,10 +151,12 @@ class BiometricService extends ChangeNotifier {
   }
 
   /// Khoá thủ công — lần truy cập nhạy cảm kế tiếp sẽ phải xác thực lại.
-  void lock() {
-    if (!_unlockedThisSession) return;
+  Future<void> lock() async {
     _unlockedThisSession = false;
     _lastAuthenticatedAt = null;
+    try {
+      await _storage.clearLastBiometricAuthTime();
+    } catch (_) {}
     notifyListeners();
   }
 
