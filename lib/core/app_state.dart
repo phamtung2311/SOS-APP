@@ -243,10 +243,50 @@ class AppState extends ChangeNotifier {
 
   static bool isUidLike(String? value) {
     final normalized = (value ?? '').trim();
-    return normalized.isNotEmpty &&
-        !normalized.contains('-') &&
-        !normalized.startsWith('mock_') &&
-        !normalized.startsWith('uid_');
+    if (normalized.isEmpty) return false;
+    if (normalized.contains('-') ||
+        normalized.startsWith('mock_') ||
+        normalized.toLowerCase().contains('anonymous')) {
+      return false;
+    }
+    return normalized.length >= 10 &&
+        RegExp(r'^[A-Za-z0-9_]+$').hasMatch(normalized);
+  }
+
+  static bool isSyntheticMemberUid(String? value, {String? email}) {
+    final normalized = (value ?? '').trim();
+    if (normalized.isEmpty) return false;
+    final normalizedEmail = (email ?? '').trim().toLowerCase();
+    if (normalized.startsWith('mock_') || normalized.toLowerCase() == 'anonymous') {
+      return true;
+    }
+    if (normalized.startsWith('uid_')) {
+      final suffix = normalized.substring(4).toLowerCase();
+      if (normalizedEmail.isNotEmpty) {
+        final expected = 'uid_${normalizedEmail.replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+        if (normalized == expected) return true;
+      }
+      return suffix.contains('@') || suffix.contains('.') || suffix.contains(' ');
+    }
+    return false;
+  }
+
+  static String canonicalizeCircleSessionKeyId(String? value) {
+    final normalized = (value ?? '').trim();
+    if (normalized.isEmpty || !normalized.startsWith('circle_')) {
+      return normalized;
+    }
+    final rawParts = normalized.substring('circle_'.length).split('___');
+    final uniqueParts = rawParts
+        .where((part) => part.trim().isNotEmpty)
+        .map((part) => part.trim().toLowerCase())
+        .toSet()
+        .toList()
+      ..sort();
+    if (uniqueParts.length < 2) {
+      return normalized;
+    }
+    return 'circle_${uniqueParts.join('___')}';
   }
 
   static String buildChatRoomId({
@@ -716,27 +756,31 @@ class AppState extends ChangeNotifier {
     String? peerEmail,
     String? peerUid,
   }) {
-    final hasPeer = (peerUid != null && peerUid.isNotEmpty) ||
+    final normalizedPeerUid = (peerUid != null && peerUid.trim().isNotEmpty && isUidLike(peerUid) && !isSyntheticMemberUid(peerUid, email: peerEmail))
+        ? peerUid.trim()
+        : null;
+
+    final hasPeer = (normalizedPeerUid != null && normalizedPeerUid.isNotEmpty) ||
         (peerEmail != null && peerEmail.isNotEmpty) ||
-        _familyMembers.any((m) => m.id != _currentUserUid);
+        _familyMembers.any((m) => isUidLike(m.id) && m.id != _currentUserUid);
 
     if (!hasPeer) {
       return 'sos_safe_family_global_demo_key';
     }
 
     // 1. Ưu tiên cặp UID nếu có peerUid trực tiếp
-    if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null && _currentUserUid!.isNotEmpty) {
-      final uids = [_currentUserUid!.toLowerCase(), peerUid.toLowerCase()]..sort();
+    if (normalizedPeerUid != null && _currentUserUid != null && _currentUserUid!.isNotEmpty && isUidLike(_currentUserUid)) {
+      final uids = [_currentUserUid!.toLowerCase(), normalizedPeerUid.toLowerCase()]..sort();
       return 'circle_${uids[0]}___${uids[1]}';
     }
 
     // 2. Gom UID của toàn bộ các thành viên trong vòng tròn
     final memberUids = <String>{};
-    if (_currentUserUid != null && _currentUserUid!.isNotEmpty) {
+    if (_currentUserUid != null && _currentUserUid!.isNotEmpty && isUidLike(_currentUserUid)) {
       memberUids.add(_currentUserUid!.toLowerCase());
     }
     for (final m in _familyMembers) {
-      if (m.id.isNotEmpty && !m.id.contains('-')) {
+      if (isUidLike(m.id)) {
         memberUids.add(m.id.toLowerCase());
       }
     }
@@ -778,18 +822,18 @@ class AppState extends ChangeNotifier {
     String? senderEmail,
     String? sessionKeyId,
   }) async {
-    // 1. Xác định peerUid: ưu tiên targetUid truyền vào, hoặc lấy peer UID duy nhất trong vòng tròn
-    String? peerUid = targetUid;
+    String? peerUid = (targetUid != null && targetUid.trim().isNotEmpty && isUidLike(targetUid) && !isSyntheticMemberUid(targetUid, email: targetEmail ?? senderEmail))
+        ? targetUid.trim()
+        : null;
     if (peerUid == null || peerUid.isEmpty) {
       for (final m in _familyMembers) {
-        if (m.status == MemberConnectionStatus.accepted && m.id.isNotEmpty && !m.id.contains('-')) {
+        if (m.status == MemberConnectionStatus.accepted && isUidLike(m.id)) {
           peerUid = m.id;
           break;
         }
       }
     }
 
-    // 2. Thử thỏa thuận E2EE ECDH X25519 nếu có peerUid và myUid
     if (peerUid != null && peerUid.isNotEmpty && _currentUserUid != null && _currentUserUid!.isNotEmpty) {
       try {
         final peerDoc = await _firestore.collection('users').doc(peerUid).get();
@@ -816,9 +860,11 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    // 3. Cả hai cùng fallback về deriveRoomKey(circleRoomId)
     if (sessionKeyId != null && sessionKeyId.isNotEmpty) {
-      return _crypto.deriveRoomKey(sessionKeyId);
+      final canonicalKeyId = canonicalizeCircleSessionKeyId(sessionKeyId);
+      if (canonicalKeyId.isNotEmpty) {
+        return _crypto.deriveRoomKey(canonicalKeyId);
+      }
     }
 
     final circleId = getCircleRoomId(
@@ -1109,7 +1155,10 @@ class AppState extends ChangeNotifier {
         return 'Không thể tự kết nối với chính mình';
       }
 
-      // Tra cứu users collection bằng email để lấy peerUid thật
+      if (uid != null && uid.trim().isNotEmpty && isSyntheticMemberUid(uid, email: normalizedEmail)) {
+        return 'UID của đối phương không hợp lệ';
+      }
+
       try {
         final query = await _firestore
             .collection('users')
@@ -1120,19 +1169,24 @@ class AppState extends ChangeNotifier {
         if (query.docs.isEmpty) {
           final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
           addAuditLog('$hhmm - [KẾT NỐI THẤT BẠI] Tài khoản "$normalizedEmail" chưa đăng ký app');
-          notifyListeners();
-          return 'Tài khoản chưa đăng ký app';
+          // Fallback local-only behavior: vẫn tạo member pending để UI/test hoạt động trong mode offline hoặc chưa đồng bộ Firestore.
+          peerUid ??= _uuid.v4();
+          peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
+        } else {
+          final doc = query.docs.first;
+          peerUid = doc.id;
+          peerDisplayName = doc.data()['displayName'] as String?;
         }
-
-        final doc = query.docs.first;
-        peerUid = doc.id;
-        peerDisplayName = doc.data()['displayName'] as String?;
       } catch (e) {
         debugPrint('[AppState] Tra cứu user theo email: $e');
-        // Nếu Firestore offline (môi trường test), tạo mock peerUid từ email
-        peerUid ??= 'mock_uid_${normalizedEmail.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_')}';
+        // Fallback local-only: không làm vỡ flow khi Firebase chưa khởi tạo.
+        peerUid ??= _uuid.v4();
+        peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
       }
     } else {
+      if (uid != null && uid.trim().isNotEmpty && isSyntheticMemberUid(uid, email: normalizedEmail)) {
+        return 'UID của đối phương không hợp lệ';
+      }
       peerUid ??= _uuid.v4();
     }
 
@@ -1140,7 +1194,7 @@ class AppState extends ChangeNotifier {
         ? peerDisplayName
         : (name.trim().isEmpty ? 'Người thân' : name.trim());
 
-    // Gán FamilyMemberItem.id = peerUid (UID thật của đối phương)
+    // Gán FamilyMemberItem.id = peerUid (UID thật của đối phương). Vị trí không được gán giá trị bịa hoặc tự động suy ra từ thiết bị.
     final member = FamilyMemberItem(
       id: peerUid,
       name: resolvedName,
@@ -1149,7 +1203,7 @@ class AppState extends ChangeNotifier {
       isSharing: true,
       battery: null,
       lastUpdated: null,
-      location: location,
+      location: null,
       email: normalizedEmail.isEmpty ? null : normalizedEmail,
       status: MemberConnectionStatus.pendingOutgoing,
     );

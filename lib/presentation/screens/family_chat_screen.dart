@@ -99,7 +99,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     _peerEmail = widget.peerEmail;
     _resolvedPeerUid = (widget.memberId ?? '').trim();
 
-    if (_resolvedPeerUid.isNotEmpty && (AppState.isUidLike(_resolvedPeerUid) || _resolvedPeerUid.startsWith('uid_'))) {
+    if (_resolvedPeerUid.isNotEmpty && AppState.isUidLike(_resolvedPeerUid)) {
       // giữ UID thật nếu peer đã có doc users
     } else if (widget.peerEmail != null && widget.peerEmail!.trim().isNotEmpty) {
       try {
