@@ -1265,7 +1265,7 @@ class AppState extends ChangeNotifier {
       isSharing: true,
       battery: null,
       lastUpdated: null,
-      location: location,
+      location: null,
       email: email?.trim(),
       status: MemberConnectionStatus.pendingIncoming,
     );
@@ -1276,6 +1276,33 @@ class AppState extends ChangeNotifier {
       '$hhmm - [YÊU CẦU ĐẾN] Nhận yêu cầu kết nối & theo dõi vị trí từ "${member.name}"',
     );
     notifyListeners();
+  }
+
+  static bool matchesInvitationForAcceptance(
+    Map<String, dynamic> data, {
+    String? currentUserEmail,
+    String? currentUserUid,
+    required String targetId,
+  }) {
+    final normalizedTargetId = targetId.trim();
+    final fromUid = (data['fromUid'] ?? data['senderUid'])?.toString();
+    final toUid = (data['toUid'] ?? data['recipientUid'])?.toString();
+    final invitedEmail = (data['toEmail'] ?? '').toString().trim().toLowerCase();
+    final senderEmail = (data['fromEmail'] ?? '').toString().trim().toLowerCase();
+    final currentEmail = (currentUserEmail ?? '').trim().toLowerCase();
+    final currentUid = (currentUserUid ?? '').trim();
+
+    final incomingMatch = currentEmail.isNotEmpty &&
+        invitedEmail == currentEmail &&
+        ((fromUid != null && fromUid == normalizedTargetId) ||
+            senderEmail == normalizedTargetId.trim().toLowerCase());
+
+    final outgoingMatch = currentUid.isNotEmpty &&
+        currentUid == (data['fromUid'] ?? data['senderUid'])?.toString() &&
+        ((toUid != null && toUid == normalizedTargetId) ||
+            invitedEmail == normalizedTargetId.trim().toLowerCase());
+
+    return incomingMatch || outgoingMatch;
   }
 
   /// Chấp thuận lời mời kết nối (Phê duyệt quyền chia sẻ vị trí).
@@ -1297,10 +1324,11 @@ class AppState extends ChangeNotifier {
         final invitationQuery = await _firestore
             .collection('invitations')
             .where('toEmail', isEqualTo: myEmail)
-            .where('fromUid', isEqualTo: id)
             .get();
         for (final doc in invitationQuery.docs) {
-          await doc.reference.update({'status': 'accepted'});
+          if (matchesInvitationForAcceptance(doc.data(), currentUserEmail: myEmail, targetId: id)) {
+            await doc.reference.update({'status': 'accepted'});
+          }
         }
       }
 
@@ -1308,10 +1336,11 @@ class AppState extends ChangeNotifier {
         final reverseQuery = await _firestore
             .collection('invitations')
             .where('fromUid', isEqualTo: myUid)
-            .where('toUid', isEqualTo: id)
             .get();
         for (final doc in reverseQuery.docs) {
-          await doc.reference.update({'status': 'accepted'});
+          if (matchesInvitationForAcceptance(doc.data(), currentUserUid: myUid, targetId: id)) {
+            await doc.reference.update({'status': 'accepted'});
+          }
         }
       }
 
@@ -1351,20 +1380,22 @@ class AppState extends ChangeNotifier {
         final query = await _firestore
             .collection('invitations')
             .where('toEmail', isEqualTo: myEmail)
-            .where('fromUid', isEqualTo: id)
             .get();
         for (final doc in query.docs) {
-          await doc.reference.update({'status': 'rejected'});
+          if (matchesInvitationForAcceptance(doc.data(), currentUserEmail: myEmail, targetId: id)) {
+            await doc.reference.update({'status': 'rejected'});
+          }
         }
       }
       if (myUid != null && myUid.isNotEmpty) {
         final reverseQuery = await _firestore
             .collection('invitations')
             .where('fromUid', isEqualTo: myUid)
-            .where('toUid', isEqualTo: id)
             .get();
         for (final doc in reverseQuery.docs) {
-          await doc.reference.update({'status': 'rejected'});
+          if (matchesInvitationForAcceptance(doc.data(), currentUserUid: myUid, targetId: id)) {
+            await doc.reference.update({'status': 'rejected'});
+          }
         }
       }
     } catch (e) {
@@ -1413,34 +1444,47 @@ class AppState extends ChangeNotifier {
         location: location,
         email: email,
       );
-    } else {
-      final int count = _familyMembers.length;
-      final Color memberColor =
-          color ?? memberPalette[count % memberPalette.length];
-
-      final memberId = uid ??
-          (email != null && email.isNotEmpty ? 'uid_${_normalizeEmail(email)}' : _uuid.v4());
-
-      final member = FamilyMemberItem(
-        id: memberId,
-        name: name.trim(),
-        relation: relation.trim(),
-        avatarColor: memberColor,
-        isSharing: true,
-        battery: null,
-        lastUpdated: status == MemberConnectionStatus.accepted ? 'Đã kết nối' : null,
-        location: location,
-        email: email?.trim(),
-        status: status,
-      );
-
-      _familyMembers.add(member);
-      final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
-      addAuditLog(
-        '$hhmm - [GIA ĐÌNH] Đã kết nối thành viên "${member.name}" (${member.relation}) • Trao đổi khóa E2EE thành công',
-      );
-      notifyListeners();
+      return;
     }
+
+    final normalizedUid = (uid ?? '').trim();
+    if (normalizedUid.isNotEmpty && isSyntheticMemberUid(normalizedUid, email: email)) {
+      final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+      addAuditLog('$hhmm - [GIA ĐÌNH] Bị từ chối UID giả: $normalizedUid');
+      notifyListeners();
+      return;
+    }
+
+    final int count = _familyMembers.length;
+    final Color memberColor = color ?? memberPalette[count % memberPalette.length];
+    final memberId = normalizedUid.isNotEmpty ? normalizedUid : _uuid.v4();
+
+    final member = FamilyMemberItem(
+      id: memberId,
+      name: name.trim(),
+      relation: relation.trim(),
+      avatarColor: memberColor,
+      isSharing: true,
+      battery: null,
+      lastUpdated: status == MemberConnectionStatus.accepted ? 'Đã kết nối' : null,
+      location: null,
+      email: email?.trim(),
+      status: status,
+    );
+
+    final existingIndex = _familyMembers.indexWhere((element) =>
+        element.id == memberId ||
+        (email != null && email.trim().isNotEmpty && element.email != null && element.email == email.trim()));
+    if (existingIndex == -1) {
+      _familyMembers.add(member);
+    } else {
+      _familyMembers[existingIndex] = member;
+    }
+    final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+    addAuditLog(
+      '$hhmm - [GIA ĐÌNH] Đã kết nối thành viên "${member.name}" (${member.relation}) • Trao đổi khóa E2EE thành công',
+    );
+    notifyListeners();
   }
 
   String? _myPairingCode;
@@ -1490,13 +1534,16 @@ class AppState extends ChangeNotifier {
         return false;
       }
       final fromUid = data['uid']?.toString();
+      final partnerEmail = data['email']?.toString();
       if (fromUid != null && fromUid == _currentUserUid) {
+        return false;
+      }
+      if (fromUid != null && fromUid.isNotEmpty && isSyntheticMemberUid(fromUid, email: partnerEmail)) {
         return false;
       }
       final partnerName = (memberName != null && memberName.trim().isNotEmpty)
           ? memberName.trim()
           : (data['name']?.toString() ?? 'Thành viên ($cleanCode)');
-      final partnerEmail = data['email']?.toString();
 
       addFamilyMember(
         name: partnerName,
@@ -1545,7 +1592,7 @@ class AppState extends ChangeNotifier {
       final memberUids = <String>{};
       for (final m in _familyMembers) {
         if (m.status == MemberConnectionStatus.accepted) {
-          if (m.id.isNotEmpty && !m.id.contains('-')) {
+          if (isUidLike(m.id)) {
             memberUids.add(m.id);
           }
           if (m.email != null && m.email!.isNotEmpty) {
@@ -1557,10 +1604,12 @@ class AppState extends ChangeNotifier {
                   .get();
               if (query.docs.isNotEmpty) {
                 final peerUid = query.docs.first.id;
-                memberUids.add(peerUid);
-                await _firestore.collection('users').doc(peerUid).set({
-                  'members': FieldValue.arrayUnion([myUid]),
-                }, SetOptions(merge: true));
+                if (isUidLike(peerUid)) {
+                  memberUids.add(peerUid);
+                  await _firestore.collection('users').doc(peerUid).set({
+                    'members': FieldValue.arrayUnion([myUid]),
+                  }, SetOptions(merge: true));
+                }
               }
             } catch (e) {
               debugPrint('[AppState] syncCircleMembers tra cứu email ${m.email} lỗi: $e');
@@ -1582,7 +1631,8 @@ class AppState extends ChangeNotifier {
 
   /// Xóa thành viên khỏi vòng tròn gia đình theo ID.
   Future<void> removeFamilyMember(String id) async {
-    final int index = _familyMembers.indexWhere((m) => m.id == id);
+    final int index = _familyMembers.indexWhere((m) => m.id == id ||
+        (_normalizeEmail(m.email) == _normalizeEmail(id) && _normalizeEmail(m.email).isNotEmpty));
     if (index != -1) {
       final member = _familyMembers[index];
       _familyMembers.removeAt(index);
@@ -1597,19 +1647,26 @@ class AppState extends ChangeNotifier {
           final invitationMatches = await _firestore
               .collection('invitations')
               .where('fromUid', isEqualTo: myUid)
-              .where('toUid', isEqualTo: id)
               .get();
           for (final doc in invitationMatches.docs) {
-            await doc.reference.update({'status': 'cancelled'});
+            final toUid = (doc.data()['toUid'] ?? doc.data()['recipientUid'])?.toString();
+            final toEmail = (doc.data()['toEmail'] ?? '').toString();
+            if ((toUid != null && toUid == id) ||
+                (_normalizeEmail(toEmail) == _normalizeEmail(member.email) && _normalizeEmail(toEmail).isNotEmpty)) {
+              await doc.reference.update({'status': 'cancelled'});
+            }
           }
 
           final incomingMatches = await _firestore
               .collection('invitations')
               .where('toEmail', isEqualTo: _normalizeEmail(member.email))
-              .where('fromUid', isEqualTo: id)
               .get();
           for (final doc in incomingMatches.docs) {
-            await doc.reference.update({'status': 'cancelled'});
+            final fromUid = (doc.data()['fromUid'] ?? doc.data()['senderUid'])?.toString();
+            if ((fromUid != null && fromUid == id) ||
+                (_normalizeEmail(doc.data()['toEmail'] ?? '') == _normalizeEmail(member.email))) {
+              await doc.reference.update({'status': 'cancelled'});
+            }
           }
 
           await _firestore.collection('users').doc(myUid).set({
