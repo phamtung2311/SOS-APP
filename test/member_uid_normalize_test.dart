@@ -1,7 +1,52 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sos_safe_family/core/app_state.dart';
+import 'package:sos_safe_family/data/services/auth_service.dart';
+import 'package:sos_safe_family/data/services/crypto_service.dart';
+import 'package:sos_safe_family/data/services/secure_storage_service.dart';
+
+class _InMemoryStorage extends SecureStorageService {
+  final Map<String, String> _mem = {};
+  @override
+  Future<void> saveUserPrivateKey(String uid, String val) async => _mem['p_$uid'] = val;
+  @override
+  Future<String?> getUserPrivateKey(String uid) async => _mem['p_$uid'];
+  @override
+  Future<void> saveUserPublicKey(String uid, String val) async => _mem['pub_$uid'] = val;
+  @override
+  Future<String?> getUserPublicKey(String uid) async => _mem['pub_$uid'];
+}
 
 void main() {
+  test('isUidLike strictly matches real Firestore UIDs and rejects fake/underscore IDs', () {
+    expect(AppState.isUidLike('IsJZEdvlR4Wp4dTXxEbd6Oeqcuy2'), isTrue);
+    expect(AppState.isUidLike('uid_phamvantunghn2b_gmail_com'), isFalse);
+    expect(AppState.isUidLike('mock_uid_x'), isFalse);
+    expect(AppState.isUidLike('anonymous'), isFalse);
+    expect(AppState.isUidLike('abc_def_123'), isFalse);
+  });
+
+  test('sendInvitation blocks inviting self email to avoid same-account loop', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final appState = AppState(
+      authService: AuthService(
+        cryptoService: CryptoService(),
+        secureStorage: _InMemoryStorage(),
+      ),
+    );
+    await appState.signInWithTestAccount(
+      email: 'tungtest@example.com',
+      displayName: 'Tùng Phạm Văn',
+    );
+
+    final err = await appState.sendInvitation(
+      name: 'Tùng Phạm Văn',
+      relation: 'Người thân',
+      email: 'TUNGTest@example.com',
+    );
+    expect(err, equals('Không thể tự kết nối với chính mình'));
+    expect(appState.familyMembers, isEmpty);
+  });
+
   test('fake member ids are rejected while real Firebase UIDs are kept', () {
     final appState = AppState();
 

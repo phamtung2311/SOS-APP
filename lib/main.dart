@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
@@ -1906,9 +1907,26 @@ class _CircleScreenState extends State<CircleScreen> {
         final outgoing = members.where((m) => m.isPendingOutgoing).toList();
         final accepted = members.where((m) => m.isAccepted).toList();
 
+        final myEmail = appState.userProfile?.email ?? appState.currentUserEmail ?? '';
+
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Vòng tròn gia đình'),
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Vòng tròn gia đình'),
+                if (myEmail.isNotEmpty)
+                  Text(
+                    myEmail,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      color: Color(0xFF757575),
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+              ],
+            ),
             backgroundColor: Colors.white,
             elevation: 0,
             actions: [
@@ -2879,6 +2897,56 @@ class ProfileScreen extends StatelessWidget {
             color: Colors.white,
             child: Column(
               children: [
+                ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5E9),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.badge_outlined,
+                      color: Color(0xFF2E7D32),
+                    ),
+                  ),
+                  title: const Text(
+                    'Tài khoản đang đăng nhập',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Text(
+                    user != null
+                        ? '${user.email}\nUID: ${user.uid}'
+                        : 'Chưa đăng nhập',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: user != null
+                      ? const Icon(
+                          Icons.copy_rounded,
+                          size: 18,
+                          color: Color(0xFF1E88E5),
+                        )
+                      : null,
+                  onTap: user == null
+                      ? null
+                      : () async {
+                          await Clipboard.setData(
+                            ClipboardData(
+                              text: 'Email: ${user.email} | UID: ${user.uid}',
+                            ),
+                          );
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Đã sao chép email và UID tài khoản đang đăng nhập',
+                              ),
+                              duration: Duration(seconds: 2),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                ),
+                const Divider(height: 1),
                 ListTile(
                   leading: Container(
                     padding: const EdgeInsets.all(8),

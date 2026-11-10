@@ -62,8 +62,8 @@ void main() {
       final aliceState = createTestAppState(crypto, storageA);
       final bobState = createTestAppState(crypto, storageB);
 
-      const uidA = 'uid_A_tung_1';
-      const uidB = 'uid_B_tung_2';
+      const uidA = 'uidATung10000000000001';
+      const uidB = 'uidBTung20000000000002';
       const sameDisplayName = 'Tùng Phạm Văn';
 
       await aliceState.signInWithTestAccount(
@@ -93,15 +93,15 @@ void main() {
 
       // Xác minh chatId hoàn toàn đồng nhất, không bị nhầm phòng do trùng tên
       expect(chatIdFromA, equals(chatIdFromB));
-      expect(chatIdFromA, equals('chat_uid_A_tung_1_uid_B_tung_2'));
+      expect(chatIdFromA, equals('chat_uidATung10000000000001_uidBTung20000000000002'));
     });
 
     test('2. ECDH X25519 giữa keypair A và public key B vs keypair B và public key A cho ra CÙNG MỘT KHÓA AES-256 (32 bytes)', () async {
       final aliceState = createTestAppState(crypto, storageA);
       final bobState = createTestAppState(crypto, storageB);
 
-      const uidA = 'uid_A_tung_1';
-      const uidB = 'uid_B_tung_2';
+      const uidA = 'uidATung10000000000001';
+      const uidB = 'uidBTung20000000000002';
 
       final profileA = await aliceState.signInWithTestAccount(
         uid: uidA,
@@ -150,24 +150,24 @@ void main() {
       final bobState = createTestAppState(crypto, storageB);
 
       final profileA = await aliceState.signInWithTestAccount(
-        uid: 'uid_A_tung_1',
+        uid: 'uidATung10000000000001',
         email: 'phamtunghn11@gmail.com',
         displayName: 'Tùng Phạm Văn',
       );
 
       final profileB = await bobState.signInWithTestAccount(
-        uid: 'uid_B_tung_2',
+        uid: 'uidBTung20000000000002',
         email: 'phamvantunghn2b@gmail.com',
         displayName: 'Tùng Phạm Văn',
       );
 
-      final privA = await storageA.getUserPrivateKey('uid_A_tung_1');
+      final privA = await storageA.getUserPrivateKey('uidATung10000000000001');
       final keyPairA = await crypto.importKeyPair(
         privateKeyB64: privA!,
         publicKeyB64: profileA.publicKeyB64,
       );
 
-      final privB = await storageB.getUserPrivateKey('uid_B_tung_2');
+      final privB = await storageB.getUserPrivateKey('uidBTung20000000000002');
       final keyPairB = await crypto.importKeyPair(
         privateKeyB64: privB!,
         publicKeyB64: profileB.publicKeyB64,
@@ -216,8 +216,8 @@ void main() {
       final aliceState = createTestAppState(crypto, storageA);
       final bobState = createTestAppState(crypto, storageB);
 
-      const uidA = 'uid_A_tung_1';
-      const uidB = 'uid_B_tung_2';
+      const uidA = 'uidATung10000000000001';
+      const uidB = 'uidBTung20000000000002';
       const sameDisplayName = 'Tùng Phạm Văn';
 
       await aliceState.signInWithTestAccount(
@@ -250,8 +250,8 @@ void main() {
       );
 
       // Xác minh ID phòng chung theo sort UID
-      expect(aliceState.getCircleRoomId(), equals('circle_uid_a_tung_1___uid_b_tung_2'));
-      expect(bobState.getCircleRoomId(), equals('circle_uid_a_tung_1___uid_b_tung_2'));
+      expect(aliceState.getCircleRoomId(), equals('circle_uidatung10000000000001___uidbtung20000000000002'));
+      expect(bobState.getCircleRoomId(), equals('circle_uidatung10000000000001___uidbtung20000000000002'));
       expect(aliceState.getCircleRoomId(), equals(bobState.getCircleRoomId()));
 
       // A kích hoạt SOS

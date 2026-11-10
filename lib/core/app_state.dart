@@ -244,29 +244,33 @@ class AppState extends ChangeNotifier {
   static bool isUidLike(String? value) {
     final normalized = (value ?? '').trim();
     if (normalized.isEmpty) return false;
-    if (normalized.contains('-') ||
-        normalized.startsWith('mock_') ||
-        normalized.toLowerCase().contains('anonymous')) {
+    final lower = normalized.toLowerCase();
+    if (normalized.contains('_') ||
+        normalized.contains('-') ||
+        lower.startsWith('uid_') ||
+        lower.startsWith('mock_') ||
+        lower.startsWith('anonymous')) {
       return false;
     }
-    return normalized.length >= 10 &&
-        RegExp(r'^[A-Za-z0-9_]+$').hasMatch(normalized);
+    return normalized.length >= 20 &&
+        RegExp(r'^[A-Za-z0-9]+$').hasMatch(normalized);
   }
 
   static bool isSyntheticMemberUid(String? value, {String? email}) {
     final normalized = (value ?? '').trim();
     if (normalized.isEmpty) return false;
-    final normalizedEmail = (email ?? '').trim().toLowerCase();
-    if (normalized.startsWith('mock_') || normalized.toLowerCase() == 'anonymous') {
+    final lower = normalized.toLowerCase();
+    if (lower.startsWith('mock_') ||
+        lower.startsWith('uid_') ||
+        lower == 'anonymous' ||
+        lower.startsWith('anonymous') ||
+        normalized.contains('_')) {
       return true;
     }
-    if (normalized.startsWith('uid_')) {
-      final suffix = normalized.substring(4).toLowerCase();
-      if (normalizedEmail.isNotEmpty) {
-        final expected = 'uid_${normalizedEmail.replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
-        if (normalized == expected) return true;
-      }
-      return suffix.contains('@') || suffix.contains('.') || suffix.contains(' ');
+    final normalizedEmail = (email ?? '').trim().toLowerCase();
+    if (normalizedEmail.isNotEmpty) {
+      final expected = 'uid_${normalizedEmail.replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+      if (lower == expected) return true;
     }
     return false;
   }
@@ -330,24 +334,117 @@ class AppState extends ChangeNotifier {
     return isIncoming ? MemberConnectionStatus.pendingIncoming : MemberConnectionStatus.pendingOutgoing;
   }
 
-  void _upsertInvitationMember(String id, Map<String, dynamic> data) {
-    final statusValue = (data['status'] ?? 'pending').toString().toLowerCase();
-    final hasIncoming = _normalizeEmail(data['toEmail'] as String?) == _currentUserEmail;
-    final hasOutgoing = (data['fromUid'] ?? data['senderUid'] ?? '').toString() == _currentUserUid;
+  FirebaseFirestore? _tryGetFirestore() {
+    try {
+      return _firestore;
+    } catch (e) {
+      debugPrint('[AppState] Firestore unavailable: $e');
+      return null;
+    }
+  }
 
-    final peerUid = ((hasIncoming
-            ? (data['fromUid'] ?? data['senderUid'])
-            : (data['toUid'] ?? data['recipientUid'])) ??
-        id)
-        .toString();
+  Future<({String? uid, String? displayName, bool found, bool offline})>
+      _lookupUserByEmail(String normalizedEmail) async {
+    if (normalizedEmail.isEmpty) {
+      return (uid: null, displayName: null, found: false, offline: false);
+    }
+    final firestore = _tryGetFirestore();
+    if (firestore == null) {
+      return (uid: null, displayName: null, found: false, offline: true);
+    }
+    try {
+      final query = await firestore
+          .collection('users')
+          .where('email', isEqualTo: normalizedEmail)
+          .limit(1)
+          .get();
+      if (query.docs.isEmpty) {
+        return (uid: null, displayName: null, found: false, offline: false);
+      }
+      final doc = query.docs.first;
+      final candidateUid = doc.id.trim();
+      final realUid = isUidLike(candidateUid) ? candidateUid : null;
+      return (
+        uid: realUid,
+        displayName: doc.data()['displayName'] as String?,
+        found: realUid != null,
+        offline: false,
+      );
+    } catch (e) {
+      debugPrint('[AppState] Tra cứu user theo email: $e');
+      return (uid: null, displayName: null, found: false, offline: true);
+    }
+  }
+
+  Future<void> _upsertInvitationMember(
+    String id,
+    Map<String, dynamic> data,
+  ) async {
+    final statusValue = (data['status'] ?? 'pending').toString().toLowerCase();
+    final hasIncoming =
+        _normalizeEmail(data['toEmail'] as String?) == _currentUserEmail;
+    final hasOutgoing =
+        (data['fromUid'] ?? data['senderUid'] ?? '').toString() ==
+            _currentUserUid;
+
+    var peerUid = ((hasIncoming
+                ? (data['fromUid'] ?? data['senderUid'])
+                : (data['toUid'] ?? data['recipientUid'])) ??
+            id)
+        .toString()
+        .trim();
+
+    final email = (hasIncoming ? data['fromEmail'] : data['toEmail'])
+            ?.toString() ??
+        data['email']?.toString();
+    final normalizedPeerEmail = _normalizeEmail(email);
 
     if (statusValue == 'rejected' || statusValue == 'cancelled') {
-      final index = _familyMembers.indexWhere((member) => member.id == peerUid || member.id == id);
+      final index = _familyMembers.indexWhere(
+        (member) =>
+            member.id == peerUid ||
+            member.id == id ||
+            (normalizedPeerEmail.isNotEmpty &&
+                _normalizeEmail(member.email) == normalizedPeerEmail),
+      );
       if (index != -1) {
         _familyMembers.removeAt(index);
         notifyListeners();
       }
       return;
+    }
+
+    // Chống tự thêm chính mình hoặc hiển thị tài khoản bịa/synthetic
+    if ((normalizedPeerEmail.isNotEmpty &&
+            normalizedPeerEmail == _currentUserEmail) ||
+        (peerUid.isNotEmpty && peerUid == _currentUserUid)) {
+      return;
+    }
+
+    var resolvedDisplayName =
+        (data['fromName'] ?? data['name'] ?? 'Người thân').toString();
+
+    if (isSyntheticMemberUid(peerUid, email: email) || !isUidLike(peerUid)) {
+      if (normalizedPeerEmail.isNotEmpty) {
+        final lookup = await _lookupUserByEmail(normalizedPeerEmail);
+        if (lookup.uid != null) {
+          peerUid = lookup.uid!;
+          if (lookup.displayName != null && lookup.displayName!.isNotEmpty) {
+            resolvedDisplayName = lookup.displayName!;
+          }
+        }
+      }
+      // Nếu sau khi tra lại vẫn là synthetic (không tìm thấy UID thật) -> ẩn khỏi UI
+      if (isSyntheticMemberUid(peerUid, email: email)) {
+        _familyMembers.removeWhere(
+          (m) =>
+              m.id == peerUid ||
+              m.id == id ||
+              isSyntheticMemberUid(m.id, email: m.email),
+        );
+        notifyListeners();
+        return;
+      }
     }
 
     final resolvedStatus = resolveInvitationStatus(
@@ -356,9 +453,7 @@ class AppState extends ChangeNotifier {
       isOutgoing: hasOutgoing,
     );
 
-    final name = (data['fromName'] ?? data['name'] ?? 'Người thân').toString();
     final relation = (data['relation'] ?? 'Người thân').toString();
-    final email = (hasIncoming ? data['fromEmail'] : data['toEmail'])?.toString() ?? data['email']?.toString();
     final colorValue = data['avatarColor'];
     final memberColor = colorValue is int
         ? Color(colorValue)
@@ -366,18 +461,27 @@ class AppState extends ChangeNotifier {
 
     final member = FamilyMemberItem(
       id: peerUid,
-      name: name.trim().isEmpty ? 'Người thân' : name.trim(),
+      name: resolvedDisplayName.trim().isEmpty
+          ? 'Người thân'
+          : resolvedDisplayName.trim(),
       relation: relation.trim().isEmpty ? 'Người thân' : relation.trim(),
       avatarColor: memberColor,
       isSharing: resolvedStatus == MemberConnectionStatus.accepted,
       battery: null,
-      lastUpdated: resolvedStatus == MemberConnectionStatus.accepted ? 'Đã kết nối' : null,
+      lastUpdated:
+          resolvedStatus == MemberConnectionStatus.accepted ? 'Đã kết nối' : null,
       location: null,
       email: email,
       status: resolvedStatus,
     );
 
-    final index = _familyMembers.indexWhere((m) => m.id == peerUid || (email != null && m.email == email) || m.id == id);
+    final index = _familyMembers.indexWhere(
+      (m) =>
+          m.id == peerUid ||
+          (normalizedPeerEmail.isNotEmpty &&
+              _normalizeEmail(m.email) == normalizedPeerEmail) ||
+          m.id == id,
+    );
     if (index == -1) {
       _familyMembers.add(member);
     } else {
@@ -479,7 +583,11 @@ class AppState extends ChangeNotifier {
 
   EncryptedSosPayload? get lastEncryptedSos => _lastEncryptedSos;
   List<String> get auditLogs => List.unmodifiable(_auditLogs);
-  List<FamilyMemberItem> get familyMembers => List.unmodifiable(_familyMembers);
+  List<FamilyMemberItem> get familyMembers => List.unmodifiable(
+        _familyMembers.where(
+          (m) => !isSyntheticMemberUid(m.id, email: m.email),
+        ),
+      );
 
   // ---- Bảo mật getters ----
 
@@ -1147,44 +1255,44 @@ class AppState extends ChangeNotifier {
     final String normalizedEmail = _normalizeEmail(email);
 
     final currentUser = _userProfile ?? _auth.currentProfile;
-    String? peerUid = uid;
+    final myEmail = _currentUserEmail ?? _normalizeEmail(currentUser?.email);
+    String? peerUid = (uid != null && uid.trim().isNotEmpty && isUidLike(uid))
+        ? uid.trim()
+        : null;
     String? peerDisplayName;
+    String? lookupError;
 
     if (normalizedEmail.isNotEmpty) {
-      if (normalizedEmail == _currentUserEmail) {
+      if (myEmail.isNotEmpty && normalizedEmail == myEmail) {
         return 'Không thể tự kết nối với chính mình';
       }
 
-      if (uid != null && uid.trim().isNotEmpty && isSyntheticMemberUid(uid, email: normalizedEmail)) {
-        return 'UID của đối phương không hợp lệ';
-      }
-
-      try {
-        final query = await _firestore
-            .collection('users')
-            .where('email', isEqualTo: normalizedEmail)
-            .limit(1)
-            .get();
-
-        if (query.docs.isEmpty) {
-          final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
-          addAuditLog('$hhmm - [KẾT NỐI THẤT BẠI] Tài khoản "$normalizedEmail" chưa đăng ký app');
-          // Fallback local-only behavior: vẫn tạo member pending để UI/test hoạt động trong mode offline hoặc chưa đồng bộ Firestore.
-          peerUid ??= _uuid.v4();
+      if (peerUid == null) {
+        final firestore = _tryGetFirestore();
+        if (firestore == null) {
+          // Offline / no-app: fallback đồng bộ ngay lập tức để UI & unit test offline không bị suspend qua microtask.
+          peerUid = _uuid.v4();
           peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
         } else {
-          final doc = query.docs.first;
-          peerUid = doc.id;
-          peerDisplayName = doc.data()['displayName'] as String?;
+          final lookup = await _lookupUserByEmail(normalizedEmail);
+          if (lookup.found && lookup.uid != null) {
+            peerUid = lookup.uid;
+            peerDisplayName = lookup.displayName;
+          } else if (!lookup.offline) {
+            final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
+            addAuditLog('$hhmm - [KẾT NỐI THẤT BẠI] Tài khoản "$normalizedEmail" chưa đăng ký app');
+            peerUid = _uuid.v4();
+            peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
+            lookupError = 'Tài khoản chưa đăng ký app';
+          } else {
+            // Fallback local-only: không làm vỡ flow khi Firebase chưa khởi tạo.
+            peerUid = _uuid.v4();
+            peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
+          }
         }
-      } catch (e) {
-        debugPrint('[AppState] Tra cứu user theo email: $e');
-        // Fallback local-only: không làm vỡ flow khi Firebase chưa khởi tạo.
-        peerUid ??= _uuid.v4();
-        peerDisplayName = name.trim().isEmpty ? 'Người thân' : name.trim();
       }
     } else {
-      if (uid != null && uid.trim().isNotEmpty && isSyntheticMemberUid(uid, email: normalizedEmail)) {
+      if (uid != null && uid.trim().isNotEmpty && !isUidLike(uid)) {
         return 'UID của đối phương không hợp lệ';
       }
       peerUid ??= _uuid.v4();
@@ -1194,9 +1302,9 @@ class AppState extends ChangeNotifier {
         ? peerDisplayName
         : (name.trim().isEmpty ? 'Người thân' : name.trim());
 
-    // Gán FamilyMemberItem.id = peerUid (UID thật của đối phương). Vị trí không được gán giá trị bịa hoặc tự động suy ra từ thiết bị.
+    // Gán FamilyMemberItem.id = peerUid (UID thật nếu tìm thấy, hoặc UUID tạm khi pending chưa có tài khoản).
     final member = FamilyMemberItem(
-      id: peerUid,
+      id: peerUid!,
       name: resolvedName,
       relation: relation.trim(),
       avatarColor: memberColor,
@@ -1208,16 +1316,17 @@ class AppState extends ChangeNotifier {
       status: MemberConnectionStatus.pendingOutgoing,
     );
 
-    if (currentUser != null && normalizedEmail.isNotEmpty) {
+    if (currentUser != null && normalizedEmail.isNotEmpty && lookupError == null) {
       try {
+        final realPeerUid = isUidLike(peerUid) ? peerUid : null;
         final payload = <String, dynamic>{
           'fromUid': currentUser.uid,
           'fromName': currentUser.displayName,
           'fromEmail': _normalizeEmail(currentUser.email),
           'senderUid': currentUser.uid,
           'toEmail': normalizedEmail,
-          'toUid': peerUid,
-          'recipientUid': peerUid,
+          'toUid': realPeerUid,
+          'recipientUid': realPeerUid,
           'relation': relation.trim(),
           'avatarColor': memberColor.toARGB32(),
           'status': 'pending',
@@ -1244,7 +1353,7 @@ class AppState extends ChangeNotifier {
       '$hhmm - [LỜI MỜI GỬI ĐI] Đã gửi yêu cầu kết nối tới "${member.name}" (${member.relation}) • Vị trí bị khóa cho đến khi đối phương chấp thuận • UID: $peerUid',
     );
     notifyListeners();
-    return null;
+    return lookupError;
   }
 
   /// Nhận được một lời mời kết nối từ người khác đến tài khoản hiện tại.
@@ -1443,14 +1552,17 @@ class AppState extends ChangeNotifier {
         color: color,
         location: location,
         email: email,
+        uid: uid,
       );
       return;
     }
 
     final normalizedUid = (uid ?? '').trim();
-    if (normalizedUid.isNotEmpty && isSyntheticMemberUid(normalizedUid, email: email)) {
+    if (normalizedUid.isNotEmpty &&
+        (!isUidLike(normalizedUid) ||
+            isSyntheticMemberUid(normalizedUid, email: email))) {
       final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
-      addAuditLog('$hhmm - [GIA ĐÌNH] Bị từ chối UID giả: $normalizedUid');
+      addAuditLog('$hhmm - [GIA ĐÌNH] Bị từ chối UID giả/không hợp lệ: $normalizedUid');
       notifyListeners();
       return;
     }
@@ -1533,13 +1645,19 @@ class AppState extends ChangeNotifier {
       if (data == null || data['status'] != 'active') {
         return false;
       }
-      final fromUid = data['uid']?.toString();
+      var fromUid = data['uid']?.toString().trim();
       final partnerEmail = data['email']?.toString();
       if (fromUid != null && fromUid == _currentUserUid) {
         return false;
       }
-      if (fromUid != null && fromUid.isNotEmpty && isSyntheticMemberUid(fromUid, email: partnerEmail)) {
-        return false;
+      if (fromUid == null ||
+          !isUidLike(fromUid) ||
+          isSyntheticMemberUid(fromUid, email: partnerEmail)) {
+        final lookup = await _lookupUserByEmail(_normalizeEmail(partnerEmail));
+        if (!lookup.found || lookup.uid == null) {
+          return false;
+        }
+        fromUid = lookup.uid;
       }
       final partnerName = (memberName != null && memberName.trim().isNotEmpty)
           ? memberName.trim()
@@ -1774,8 +1892,15 @@ class AppState extends ChangeNotifier {
     _isAuthLoading = true;
     notifyListeners();
     try {
+      final sanitizedEmail = email
+          .trim()
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final rawTestUid = 'testUid$sanitizedEmail';
       final safeUid = uid ??
-          'test_uid_${email.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+          (rawTestUid.length >= 20
+              ? rawTestUid
+              : rawTestUid.padRight(20, '0'));
       final profile = await _auth.provisionOrLoadUserKeys(
         uid: safeUid,
         displayName: displayName.trim().isEmpty ? 'Người dùng kiểm thử' : displayName.trim(),

@@ -93,7 +93,7 @@ void main() {
 
       // Xác minh ID phòng thống nhất dựa trên sort alphabet UID
       expect(circleA, equals(circleB));
-      expect(circleA, equals('circle_test_uid_tung_ct070161_kma_edu_vn___test_uid_vu_ct070165_kma_edu_vn'));
+      expect(circleA, equals('circle_testuidtungct070161kmaeduvn___testuidvuct070165kmaeduvn'));
 
       // Xác minh hai máy dẫn xuất cùng một khóa đối xứng AES-256
       final keyA = await aliceState.resolveSosSessionKey();

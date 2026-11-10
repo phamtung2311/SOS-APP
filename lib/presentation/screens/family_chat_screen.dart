@@ -230,7 +230,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     });
 
     debugPrint(
-      '[CHAT] room=$_chatId kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} key=${_isE2EE ? 'E2EE' : 'demo'} myUid=${_myUid ?? 'null'} peerUid=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'null')}',
+      '[CHAT] room=$_chatId kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} key=${_isE2EE ? 'E2EE' : 'demo'} myEmail=${_myEmail ?? 'null'} peerEmail=${_peerEmail ?? 'null'} myUid=${_myUid ?? 'null'} peerUid=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'null')}',
     );
     _listenToMessages(keyBytes);
   }
@@ -612,6 +612,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
         backgroundColor: Colors.white,
         elevation: 0,
         titleSpacing: 0,
+        toolbarHeight: 78,
         title: Row(
           children: [
             Stack(
@@ -689,7 +690,9 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'room=${_chatId.isNotEmpty ? _chatId : 'unknown'} | kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} | key=${_isE2EE ? 'E2EE' : 'demo'} | member=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'n/a')}',
+                    'room=${_chatId.isNotEmpty ? _chatId : 'unknown'} | kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} | key=${_isE2EE ? 'E2EE' : 'demo'} | myEmail=${(_myEmail ?? '').isNotEmpty ? _myEmail : 'n/a'} | peerEmail=${(_peerEmail ?? '').isNotEmpty ? _peerEmail : 'n/a'}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 9.5, color: Color(0xFF607D8B)),
                   ),
                 ],
