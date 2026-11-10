@@ -22,11 +22,17 @@ class FamilyChatScreen extends StatefulWidget {
     required this.memberName,
     this.peerEmail,
     this.memberId,
+    this.profileWaitTimeout = const Duration(seconds: 15),
+    this.firestore,
+    this.secureStorage,
   });
 
   final String memberName;
   final String? peerEmail;
   final String? memberId;
+  final Duration profileWaitTimeout;
+  final FirebaseFirestore? firestore;
+  final SecureStorageService? secureStorage;
 
   @override
   State<FamilyChatScreen> createState() => _FamilyChatScreenState();
@@ -34,13 +40,16 @@ class FamilyChatScreen extends StatefulWidget {
 
 class _FamilyChatScreenState extends State<FamilyChatScreen> {
   final CryptoService _crypto = CryptoService();
-  final SecureStorageService _storage = SecureStorageService();
+  late final SecureStorageService _storage;
   final ImagePicker _picker = ImagePicker();
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<ChatMessage> _messages = [];
 
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _chatSub;
+  AppState? _observedAppState;
+  VoidCallback? _lateAuthListener;
+  Timer? _waitPollTimer;
   String _chatId = '';
   String? _myEmail;
   String? _myUid;
@@ -53,6 +62,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
   bool _isE2EE = false;
   bool _isLoading = true;
   bool _hasConnectionError = false;
+  bool _authMissingError = false;
 
   bool _isInspectorEnabled = true;
   bool _isSending = false;
@@ -65,6 +75,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
   @override
   void initState() {
     super.initState();
+    _storage = widget.secureStorage ?? SecureStorageService();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _bootstrap();
     });
@@ -72,38 +83,151 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
 
   @override
   void dispose() {
+    _waitPollTimer?.cancel();
+    if (_lateAuthListener != null && _observedAppState != null) {
+      _observedAppState!.removeListener(_lateAuthListener!);
+    }
     _chatSub?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
+  FirebaseFirestore? _tryGetFirestore() {
+    if (widget.firestore != null) return widget.firestore;
+    try {
+      return FirebaseFirestore.instance;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Chờ `AppState.userProfile` sẵn sàng (poll 300ms + listener) tối đa [widget.profileWaitTimeout].
+  Future<UserSecurityProfile?> _waitForProfile() async {
+    AppState? appState;
+    try {
+      appState = AppScope.read(context);
+      _observedAppState = appState;
+    } catch (_) {
+      return null;
+    }
+
+    final immediate = appState.userProfile;
+    if (immediate != null && immediate.uid.isNotEmpty) {
+      return immediate;
+    }
+
+    final completer = Completer<UserSecurityProfile?>();
+    Timer? timeoutTimer;
+    void Function()? listener;
+
+    void finish(UserSecurityProfile? profile) {
+      if (completer.isCompleted) return;
+      _waitPollTimer?.cancel();
+      _waitPollTimer = null;
+      timeoutTimer?.cancel();
+      if (listener != null) {
+        appState?.removeListener(listener);
+      }
+      completer.complete(profile);
+    }
+
+    listener = () {
+      if (!mounted) {
+        finish(null);
+        return;
+      }
+      final current = appState?.userProfile;
+      if (current != null && current.uid.isNotEmpty) {
+        finish(current);
+      }
+    };
+    appState.addListener(listener);
+
+    _waitPollTimer?.cancel();
+    _waitPollTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+      if (!mounted) {
+        finish(null);
+        return;
+      }
+      final current = appState?.userProfile;
+      if (current != null && current.uid.isNotEmpty) {
+        finish(current);
+      }
+    });
+
+    timeoutTimer = Timer(widget.profileWaitTimeout, () {
+      final current = appState?.userProfile;
+      finish((current != null && current.uid.isNotEmpty) ? current : null);
+    });
+
+    return completer.future;
+  }
+
+  void _ensureLateAuthAutoRetry(AppState? appState) {
+    if (appState == null || _lateAuthListener != null) return;
+    _lateAuthListener = () {
+      if (!mounted) return;
+      final profile = appState.userProfile;
+      if (profile != null && profile.uid.isNotEmpty && _authMissingError) {
+        appState.removeListener(_lateAuthListener!);
+        _lateAuthListener = null;
+        _bootstrap();
+      }
+    };
+    appState.addListener(_lateAuthListener!);
+  }
+
   /// Thiết lập khóa phiên phòng chat và lắng nghe tin nhắn Firestore.
   ///
   /// Quy trình thỏa thuận khóa E2EE thật:
-  /// 1. Lấy `publicKey` của đối phương (peer) từ Firestore collection `users/{peerUid}`.
-  /// 2. Nạp khóa bí mật của chính mình từ Android Keystore (SecureStorage).
-  /// 3. Thực hiện ECDH X25519 + HKDF-SHA256 để sinh ra cùng 1 khóa phiên AES-256.
-  /// 4. Nếu thiếu peer key hoặc chưa đăng nhập: Fallback về `deriveRoomKey` và gán `_isE2EE = false`.
+  /// 1. Chờ `AppState.userProfile` hợp lệ (không tính room/key khi `_myUid` null).
+  /// 2. Lấy `publicKey` của đối phương (peer) từ Firestore collection `users/{peerUid}`.
+  /// 3. Nạp khóa bí mật của chính mình từ Android Keystore (SecureStorage).
+  /// 4. Thực hiện ECDH X25519 + HKDF-SHA256 để sinh ra cùng 1 khóa phiên AES-256.
+  /// 5. Nếu thiếu peer key: Fallback về `deriveRoomKey` và gán `_isE2EE = false`.
   Future<void> _bootstrap() async {
-    UserSecurityProfile? user;
-    try {
-      final appState = AppScope.read(context);
-      user = appState.userProfile;
-      _myEmail = user?.email;
-      _myUid = user?.uid;
-      _myName = user?.displayName ?? 'Tôi';
-    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _isLoading = true;
+      _hasConnectionError = false;
+      _authMissingError = false;
+    });
+
+    final user = await _waitForProfile();
+    if (!mounted) return;
+
+    if (user == null || user.uid.isEmpty) {
+      _ensureLateAuthAutoRetry(_observedAppState);
+      setState(() {
+        _myEmail = null;
+        _myUid = null;
+        _chatId = '';
+        _sharedKey = null;
+        _isLoading = false;
+        _hasConnectionError = true;
+        _authMissingError = true;
+      });
+      return;
+    }
+
+    _myEmail = user.email;
+    _myUid = user.uid;
+    _myName = user.displayName.isNotEmpty ? user.displayName : 'Tôi';
 
     _peerDisplayName = widget.memberName;
     _peerEmail = widget.peerEmail;
     _resolvedPeerUid = (widget.memberId ?? '').trim();
 
+    final firestore = _tryGetFirestore();
+
     if (_resolvedPeerUid.isNotEmpty && AppState.isUidLike(_resolvedPeerUid)) {
       // giữ UID thật nếu peer đã có doc users
-    } else if (widget.peerEmail != null && widget.peerEmail!.trim().isNotEmpty) {
+    } else if (firestore != null &&
+        widget.peerEmail != null &&
+        widget.peerEmail!.trim().isNotEmpty) {
       try {
-        final emailLookup = await FirebaseFirestore.instance
+        final emailLookup = await firestore
             .collection('users')
             .where('email', isEqualTo: widget.peerEmail!.trim().toLowerCase())
             .limit(1)
@@ -127,49 +251,57 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
 
     // 1. Thử truy vấn Public Key của peer từ Cloud Firestore
     String? peerPublicKeyB64;
-    try {
-      final peerLookupUid = _resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : widget.memberId;
-      if (peerLookupUid != null && peerLookupUid.isNotEmpty) {
-        final doc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(peerLookupUid)
-            .get();
-        if (doc.exists && doc.data() != null) {
-          final data = doc.data()!;
-          peerPublicKeyB64 = data['publicKey'] as String?;
-          final dbName = data['displayName'] as String?;
-          if (dbName != null && dbName.isNotEmpty) {
-            _peerDisplayName = dbName;
-          }
-          final dbEmail = data['email'] as String?;
-          if (dbEmail != null && dbEmail.isNotEmpty) {
-            _peerEmail = dbEmail;
+    if (firestore != null) {
+      try {
+        final peerLookupUid = _resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : widget.memberId;
+        if (peerLookupUid != null && peerLookupUid.isNotEmpty && AppState.isUidLike(peerLookupUid)) {
+          final doc = await firestore
+              .collection('users')
+              .doc(peerLookupUid)
+              .get();
+          if (doc.exists && doc.data() != null) {
+            final data = doc.data()!;
+            peerPublicKeyB64 = data['publicKey'] as String?;
+            final dbName = data['displayName'] as String?;
+            if (dbName != null && dbName.isNotEmpty) {
+              _peerDisplayName = dbName;
+            }
+            final dbEmail = data['email'] as String?;
+            if (dbEmail != null && dbEmail.isNotEmpty) {
+              _peerEmail = dbEmail;
+            }
           }
         }
-      }
 
-      if (peerPublicKeyB64 == null && widget.peerEmail != null && widget.peerEmail!.isNotEmpty) {
-        final query = await FirebaseFirestore.instance
-            .collection('users')
-            .where('email', isEqualTo: widget.peerEmail!.trim().toLowerCase())
-            .limit(1)
-            .get();
-        if (query.docs.isNotEmpty) {
-          final data = query.docs.first.data();
-          peerPublicKeyB64 = data['publicKey'] as String?;
-          final dbName = data['displayName'] as String?;
-          if (dbName != null && dbName.isNotEmpty) {
-            _peerDisplayName = dbName;
+        if (peerPublicKeyB64 == null && widget.peerEmail != null && widget.peerEmail!.isNotEmpty) {
+          final query = await firestore
+              .collection('users')
+              .where('email', isEqualTo: widget.peerEmail!.trim().toLowerCase())
+              .limit(1)
+              .get();
+          if (query.docs.isNotEmpty) {
+            final data = query.docs.first.data();
+            peerPublicKeyB64 = data['publicKey'] as String?;
+            final dbName = data['displayName'] as String?;
+            if (dbName != null && dbName.isNotEmpty) {
+              _peerDisplayName = dbName;
+            }
+            final dbEmail = data['email'] as String?;
+            if (dbEmail != null && dbEmail.isNotEmpty) {
+              _peerEmail = dbEmail;
+            }
+            if (AppState.isUidLike(query.docs.first.id)) {
+              _resolvedPeerUid = query.docs.first.id;
+              if (_myUid != null && _myUid!.isNotEmpty) {
+                _chatId = AppState.buildChatRoomId(myUid: _myUid!, peerUid: _resolvedPeerUid);
+                _isDemoFallbackRoom = false;
+              }
+            }
           }
-          final dbEmail = data['email'] as String?;
-          if (dbEmail != null && dbEmail.isNotEmpty) {
-            _peerEmail = dbEmail;
-          }
-          _resolvedPeerUid = query.docs.first.id;
         }
+      } catch (e) {
+        debugPrint('[FamilyChatScreen] Lỗi truy vấn Firestore lấy peer key: $e');
       }
-    } catch (e) {
-      debugPrint('[FamilyChatScreen] Lỗi truy vấn Firestore lấy peer key: $e');
     }
 
     Uint8List? keyBytes;
@@ -178,7 +310,9 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     if (peerPublicKeyB64 != null && peerPublicKeyB64.isNotEmpty && _myUid != null) {
       try {
         final privB64 = await _storage.getUserPrivateKey(_myUid!);
-        final pubB64 = user?.publicKeyB64 ?? await _storage.getUserPublicKey(_myUid!);
+        final pubB64 = user.publicKeyB64.isNotEmpty
+            ? user.publicKeyB64
+            : await _storage.getUserPublicKey(_myUid!);
         if (privB64 != null && pubB64 != null) {
           final myKeyPair = await _crypto.importKeyPair(
             privateKeyB64: privB64,
@@ -202,35 +336,44 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
       debugPrint('[FamilyChatScreen] ⚠️ Thiếu peer key -> Fallback deriveRoomKey (demo)');
     }
 
-    try {
-      final membersList = <String>[];
-      if (_myUid != null && _myUid!.isNotEmpty) membersList.add(_myUid!);
-      if (_resolvedPeerUid.isNotEmpty && !membersList.contains(_resolvedPeerUid)) {
-        membersList.add(_resolvedPeerUid);
-      }
-      if (membersList.isNotEmpty) {
-        await FirebaseFirestore.instance
+    // Chỉ ghi doc chats/{room} KHI có đủ cả _myUid lẫn _resolvedPeerUid (2 UID hợp lệ).
+    final canWriteChatMembers = firestore != null &&
+        _myUid != null &&
+        _myUid!.isNotEmpty &&
+        _resolvedPeerUid.isNotEmpty &&
+        _myUid != _resolvedPeerUid &&
+        AppState.isUidLike(_resolvedPeerUid) &&
+        !_isDemoFallbackRoom;
+    if (canWriteChatMembers) {
+      try {
+        final membersList = <String>[_myUid!, _resolvedPeerUid];
+        await firestore
             .collection('chats')
             .doc(_chatId)
             .set({
           'members': membersList,
           'lastActivity': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
+      } catch (e) {
+        debugPrint('[FamilyChatScreen] Cập nhật doc chats members skipped: $e');
       }
-    } catch (e) {
-      debugPrint('[FamilyChatScreen] Cập nhật doc chats members skipped: $e');
+    } else {
+      debugPrint(
+        '[FamilyChatScreen] Bỏ qua ghi chats/{$_chatId}.members do chưa đủ 2 UID hợp lệ (myUid=$_myUid, peerUid=$_resolvedPeerUid)',
+      );
     }
 
     if (!mounted) return;
     setState(() {
       _sharedKey = keyBytes;
       _isE2EE = isE2eeSuccess;
-      _isLoading = true;
+      _isLoading = firestore != null;
       _hasConnectionError = false;
+      _authMissingError = false;
     });
 
     debugPrint(
-      '[CHAT] room=$_chatId kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} key=${_isE2EE ? 'E2EE' : 'demo'} myEmail=${_myEmail ?? 'null'} peerEmail=${_peerEmail ?? 'null'} myUid=${_myUid ?? 'null'} peerUid=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : (widget.memberId ?? 'null')}',
+      '[CHAT] bootstrap myUid=${_myUid ?? 'null'} peerUid=${_resolvedPeerUid.isNotEmpty ? _resolvedPeerUid : 'null'} room=$_chatId kind=${_isDemoFallbackRoom ? 'email-fallback' : 'uid'} key=${_isE2EE ? 'E2EE' : 'demo'} myEmail=${_myEmail ?? 'null'} peerEmail=${_peerEmail ?? 'null'}',
     );
     _listenToMessages(keyBytes);
   }
@@ -238,8 +381,10 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
   /// Lắng nghe các tin nhắn mã hóa thời gian thực từ Firestore và giải mã E2EE.
   void _listenToMessages(Uint8List key) {
     _chatSub?.cancel();
+    final firestore = _tryGetFirestore();
+    if (firestore == null) return;
     try {
-      _chatSub = FirebaseFirestore.instance
+      _chatSub = firestore
           .collection('chats')
           .doc(_chatId)
           .collection('messages')
@@ -250,10 +395,23 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
         for (final doc in snapshot.docs) {
           final d = doc.data();
           final senderEmail = (d['senderEmail'] as String? ?? '').toLowerCase().trim();
-          final senderId = d['senderId'] as String? ?? '';
+          final senderUid = (d['senderUid'] as String? ?? '').trim();
+          final senderId = (d['senderId'] as String? ?? '').trim();
           final senderName = d['senderName'] as String? ?? widget.memberName;
-          final isMine = (senderEmail.isNotEmpty && senderEmail == _myEmail?.toLowerCase().trim()) ||
-              (senderId.isNotEmpty && (senderId == _myUid || senderId == 'me'));
+          final myNormalizedEmail = (_myEmail ?? '').toLowerCase().trim();
+          final bool isMine;
+          if (senderEmail.isNotEmpty && myNormalizedEmail.isNotEmpty) {
+            isMine = senderEmail == myNormalizedEmail;
+          } else if (senderUid.isNotEmpty && _myUid != null && _myUid!.isNotEmpty) {
+            isMine = senderUid == _myUid;
+          } else if (senderId.isNotEmpty &&
+              senderId != 'me' &&
+              _myUid != null &&
+              _myUid!.isNotEmpty) {
+            isMine = senderId == _myUid;
+          } else {
+            isMine = senderId == 'me';
+          }
 
           final cipherB64 = d['ciphertextBase64'] as String? ?? '';
           final nonceB64 = d['nonceBase64'] as String? ?? '';
@@ -394,6 +552,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     try {
       final docMap = localMsg.toFirestoreMap(
         senderEmail: _myEmail ?? '',
+        senderUid: _myUid,
         createdAt: FieldValue.serverTimestamp(),
       );
       await FirebaseFirestore.instance
@@ -473,6 +632,7 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
     try {
       final docMap = localMsg.toFirestoreMap(
         senderEmail: _myEmail ?? '',
+        senderUid: _myUid,
         createdAt: FieldValue.serverTimestamp(),
       );
       await FirebaseFirestore.instance
@@ -792,9 +952,12 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                                 color: Colors.grey.shade400,
                               ),
                               const SizedBox(height: 12),
-                              const Text(
-                                'Không kết nối được máy chủ',
-                                style: TextStyle(
+                              Text(
+                                _authMissingError
+                                    ? 'Chưa đăng nhập, không thể mở khóa E2EE'
+                                    : 'Không kết nối được máy chủ',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.w600,
                                   color: Color(0xFF37474F),
@@ -802,7 +965,9 @@ class _FamilyChatScreenState extends State<FamilyChatScreen> {
                               ),
                               const SizedBox(height: 6),
                               Text(
-                                'Vui lòng kiểm tra lại kết nối mạng và thử lại.',
+                                _authMissingError
+                                    ? 'Vui lòng hoàn tất đăng nhập tài khoản trước khi nhắn tin bảo mật E2EE.'
+                                    : 'Vui lòng kiểm tra lại kết nối mạng và thử lại.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
                               ),

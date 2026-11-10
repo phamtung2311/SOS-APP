@@ -83,10 +83,13 @@ class ChatMessage {
   /// để đảm bảo máy chủ trung gian không thể đọc được nội dung tin nhắn.
   Map<String, dynamic> toFirestoreMap({
     String? senderEmail,
+    String? senderUid,
     dynamic createdAt,
   }) {
+    final effectiveSenderId =
+        (senderUid != null && senderUid.isNotEmpty) ? senderUid : senderId;
     final map = <String, dynamic>{
-      'senderId': senderId,
+      'senderId': effectiveSenderId,
       'senderName': senderName,
       'type': type == MessageType.image ? 'image' : 'text',
       'ciphertextBase64': ciphertextBase64 ?? '',
@@ -94,6 +97,9 @@ class ChatMessage {
       'macBase64': macBase64 ?? '',
       'createdAt': createdAt,
     };
+    if (senderUid != null && senderUid.isNotEmpty) {
+      map['senderUid'] = senderUid;
+    }
     if (senderEmail != null) {
       map['senderEmail'] = senderEmail;
     }

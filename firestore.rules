@@ -9,10 +9,15 @@ service cloud.firestore {
 
     // 1. Collection `users/{uid}`:
     // Read: Mọi user đã xác thực (để tìm kiếm thành viên và trao đổi Public Key X25519 cho E2EE).
-    // Write: Chỉ chính chủ được ghi vào profile của mình.
+    // Vòng tròn gia đình là quan hệ 2 chiều nên cần ghi members vào doc của peer.
     match /users/{uid} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated() && request.auth.uid == uid;
+      allow create, delete: if isAuthenticated() && request.auth.uid == uid;
+      allow update: if isAuthenticated() && (
+        request.auth.uid == uid ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members']) &&
+         request.resource.data.members is list)
+      );
     }
 
     // 2. Collection `chats/{chatId}`:

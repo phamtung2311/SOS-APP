@@ -102,6 +102,16 @@ class FamilyMemberItem {
   }
 }
 
+/// Giao diện cập nhật field `members` của `users/{uid}` phục vụ test fake/mock Firestore
+/// mà không cần subclass các lớp `@sealed` của `cloud_firestore`.
+abstract class CircleMembersWriter {
+  Future<void> updateUserMembers({
+    required String docUid,
+    required String targetMemberUid,
+    required bool add,
+  });
+}
+
 /// Trạng thái ứng dụng dùng chung cho các màn hình.
 ///
 /// Giữ vị trí GPS hiện tại, danh sách vùng an toàn, sự kiện SOS đang hoạt
@@ -115,10 +125,13 @@ class AppState extends ChangeNotifier {
     AuthService? authService,
     LocationShareService? locationShareService,
     PushService? pushService,
+    FirebaseFirestore? firestore,
+    this.circleMembersWriter,
   })  : _crypto = cryptoService ?? CryptoService(),
         _biometric = biometricService ?? BiometricService(),
         _tamper = tamperDetector ?? TamperDetector(),
-        _auth = authService ?? AuthService(cryptoService: cryptoService) {
+        _auth = authService ?? AuthService(cryptoService: cryptoService),
+        _injectedFirestore = firestore {
     _sosService = SosService(cryptoService: _crypto);
     _locationShareService = locationShareService ?? LocationShareService(cryptoService: _crypto);
     _pushService = pushService ?? PushService();
@@ -132,7 +145,9 @@ class AppState extends ChangeNotifier {
   final AuthService _auth;
   late final LocationShareService _locationShareService;
   late final PushService _pushService;
-  FirebaseFirestore get _firestore => FirebaseFirestore.instance;
+  final FirebaseFirestore? _injectedFirestore;
+  final CircleMembersWriter? circleMembersWriter;
+  FirebaseFirestore get _firestore => _injectedFirestore ?? FirebaseFirestore.instance;
   StreamSubscription<UserSecurityProfile?>? _authSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _incomingInvitationSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _outgoingInvitationSub;
@@ -154,6 +169,31 @@ class AppState extends ChangeNotifier {
   String? _sosError;
   LatLng? _focusedLocation;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sosEventsSub;
+
+  final Map<String, String> _activeInvitationDocByPeer = {};
+  final Map<String, int> _activeInvitationMsByPeer = {};
+
+  void _processInvitationSnapshot(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final sortedDocs = List<QueryDocumentSnapshot<Map<String, dynamic>>>.from(docs)
+      ..sort((a, b) {
+        final ta = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+        final tb = (b.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+        if (ta != tb) return ta.compareTo(tb);
+        int weight(String s) {
+          final l = s.toLowerCase();
+          if (l == 'cancelled' || l == 'rejected') return 0;
+          if (l == 'pending') return 1;
+          return 2;
+        }
+        return weight((a.data()['status'] ?? '').toString())
+            .compareTo(weight((b.data()['status'] ?? '').toString()));
+      });
+    for (final doc in sortedDocs) {
+      _upsertInvitationMember(doc.id, doc.data());
+    }
+  }
 
   void _initAuthListener() {
     try {
@@ -186,6 +226,8 @@ class AppState extends ChangeNotifier {
     _geofenceEventsSub = null;
     _currentUserUid = null;
     _currentUserEmail = null;
+    _activeInvitationDocByPeer.clear();
+    _activeInvitationMsByPeer.clear();
     _familyMembers.clear();
   }
 
@@ -203,6 +245,7 @@ class AppState extends ChangeNotifier {
 
     _incomingInvitationSub?.cancel();
     _outgoingInvitationSub?.cancel();
+    _normalizeExistingMemberIds();
     initSosListener();
     initLocationListeners();
     syncCircleMembersToFirestore();
@@ -222,9 +265,7 @@ class AppState extends ChangeNotifier {
           .where('toEmail', isEqualTo: normalizedEmail)
           .snapshots()
           .listen((snapshot) {
-            for (final doc in snapshot.docs) {
-              _upsertInvitationMember(doc.id, doc.data());
-            }
+            _processInvitationSnapshot(snapshot.docs);
           });
 
       _outgoingInvitationSub = _firestore
@@ -232,9 +273,7 @@ class AppState extends ChangeNotifier {
           .where('fromUid', isEqualTo: profile.uid)
           .snapshots()
           .listen((snapshot) {
-            for (final doc in snapshot.docs) {
-              _upsertInvitationMember(doc.id, doc.data());
-            }
+            _processInvitationSnapshot(snapshot.docs);
           });
     } catch (e) {
       debugPrint('[AppState] sync invitations skipped: $e');
@@ -371,8 +410,141 @@ class AppState extends ChangeNotifier {
         offline: false,
       );
     } catch (e) {
-      debugPrint('[AppState] Tra cứu user theo email: $e');
+      debugPrint('[AppState] Tra cứu user theo email ($normalizedEmail) lỗi: $e');
       return (uid: null, displayName: null, found: false, offline: true);
+    }
+  }
+
+  /// Chuẩn hóa member.id chưa phải UID thật (hoặc là synthetic UID) khi userProfile về.
+  Future<void> _normalizeExistingMemberIds() async {
+    final snapshot = List<FamilyMemberItem>.from(_familyMembers);
+    var changed = false;
+    for (final m in snapshot) {
+      if (!isUidLike(m.id) || isSyntheticMemberUid(m.id, email: m.email)) {
+        final email = _normalizeEmail(m.email);
+        if (email.isNotEmpty) {
+          final lookup = await _lookupUserByEmail(email);
+          if (lookup.found && lookup.uid != null) {
+            final idx = _familyMembers.indexWhere((item) => item.id == m.id);
+            if (idx != -1) {
+              _familyMembers[idx] = m.copyWith(
+                id: lookup.uid,
+                name: (lookup.displayName != null && lookup.displayName!.isNotEmpty)
+                    ? lookup.displayName
+                    : m.name,
+              );
+              changed = true;
+            }
+            if (m.isAccepted) {
+              await _addCircleMember(lookup.uid!);
+            }
+          } else if (!lookup.offline && isSyntheticMemberUid(m.id, email: m.email)) {
+            _familyMembers.removeWhere((item) => item.id == m.id);
+            changed = true;
+          }
+        } else if (isSyntheticMemberUid(m.id, email: m.email)) {
+          _familyMembers.removeWhere((item) => item.id == m.id);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      notifyListeners();
+    }
+  }
+
+  String _extractFirestoreErrorCode(Object error) {
+    if (error is FirebaseException) {
+      return error.code;
+    }
+    return error.toString();
+  }
+
+  Future<void> _writeCircleMemberDoc({
+    required FirebaseFirestore? firestore,
+    required String docUid,
+    required String targetMemberUid,
+    required bool add,
+  }) async {
+    final opName = add ? 'arrayUnion' : 'arrayRemove';
+    if (circleMembersWriter != null) {
+      try {
+        await circleMembersWriter!.updateUserMembers(
+          docUid: docUid,
+          targetMemberUid: targetMemberUid,
+          add: add,
+        );
+        debugPrint('[AppState] users.members OK doc=$docUid');
+      } catch (e) {
+        debugPrint(
+          '[AppState] users.members FAIL ($opName) doc=$docUid code=${_extractFirestoreErrorCode(e)} error=$e',
+        );
+      }
+      return;
+    }
+
+    if (firestore == null) return;
+    final fieldVal = add
+        ? FieldValue.arrayUnion([targetMemberUid])
+        : FieldValue.arrayRemove([targetMemberUid]);
+    try {
+      await firestore.collection('users').doc(docUid).set({
+        'members': fieldVal,
+      }, SetOptions(merge: true));
+      debugPrint('[AppState] users.members OK doc=$docUid');
+    } catch (e) {
+      debugPrint(
+        '[AppState] users.members FAIL ($opName) doc=$docUid code=${_extractFirestoreErrorCode(e)} error=$e',
+      );
+    }
+  }
+
+  /// Thêm thành viên vào vòng tròn gia đình 2 chiều:
+  /// ghi vào doc của mình (`users/{myUid}.members`) và doc của peer (`users/{peerUid}.members`).
+  Future<void> _addCircleMember(String peerUid) async {
+    final myUid = (_currentUserUid ?? _userProfile?.uid ?? '').trim();
+    final targetUid = peerUid.trim();
+    if (myUid.isEmpty || targetUid.isEmpty || myUid == targetUid) return;
+    final firestore = _tryGetFirestore();
+    if (firestore == null && circleMembersWriter == null) return;
+
+    await _writeCircleMemberDoc(
+      firestore: firestore,
+      docUid: myUid,
+      targetMemberUid: targetUid,
+      add: true,
+    );
+    if (isUidLike(targetUid)) {
+      await _writeCircleMemberDoc(
+        firestore: firestore,
+        docUid: targetUid,
+        targetMemberUid: myUid,
+        add: true,
+      );
+    }
+  }
+
+  /// Gỡ thành viên khỏi vòng tròn gia đình 2 chiều (`users/{myUid}.members` và `users/{peerUid}.members`).
+  Future<void> _removeCircleMember(String peerUid) async {
+    final myUid = (_currentUserUid ?? _userProfile?.uid ?? '').trim();
+    final targetUid = peerUid.trim();
+    if (myUid.isEmpty || targetUid.isEmpty) return;
+    final firestore = _tryGetFirestore();
+    if (firestore == null && circleMembersWriter == null) return;
+
+    await _writeCircleMemberDoc(
+      firestore: firestore,
+      docUid: myUid,
+      targetMemberUid: targetUid,
+      add: false,
+    );
+    if (isUidLike(targetUid)) {
+      await _writeCircleMemberDoc(
+        firestore: firestore,
+        docUid: targetUid,
+        targetMemberUid: myUid,
+        add: false,
+      );
     }
   }
 
@@ -398,8 +570,20 @@ class AppState extends ChangeNotifier {
             ?.toString() ??
         data['email']?.toString();
     final normalizedPeerEmail = _normalizeEmail(email);
+    final docMs = (data['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+    final peerKey = isUidLike(peerUid)
+        ? peerUid
+        : (normalizedPeerEmail.isNotEmpty ? normalizedPeerEmail : id);
 
     if (statusValue == 'rejected' || statusValue == 'cancelled') {
+      final activeDocId = _activeInvitationDocByPeer[peerKey];
+      final activeMs = _activeInvitationMsByPeer[peerKey] ?? 0;
+      if (activeDocId != null && activeDocId != id && docMs > 0 && activeMs > docMs) {
+        // Doc hủy cũ hơn doc kết nối hiện tại -> bỏ qua, không xóa nhầm thành viên đang kết nối
+        return;
+      }
+      _activeInvitationDocByPeer.remove(peerKey);
+      _activeInvitationMsByPeer.remove(peerKey);
       final index = _familyMembers.indexWhere(
         (member) =>
             member.id == peerUid ||
@@ -412,6 +596,11 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       }
       return;
+    }
+
+    _activeInvitationDocByPeer[peerKey] = id;
+    if (docMs > (_activeInvitationMsByPeer[peerKey] ?? 0)) {
+      _activeInvitationMsByPeer[peerKey] = docMs;
     }
 
     // Chống tự thêm chính mình hoặc hiển thị tài khoản bịa/synthetic
@@ -1426,47 +1615,54 @@ class AppState extends ChangeNotifier {
       );
     }
 
-    try {
-      final myEmail = _currentUserEmail;
-      final myUid = _currentUserUid;
-      if (myEmail != null && myEmail.isNotEmpty) {
-        final invitationQuery = await _firestore
-            .collection('invitations')
-            .where('toEmail', isEqualTo: myEmail)
-            .get();
-        for (final doc in invitationQuery.docs) {
-          if (matchesInvitationForAcceptance(doc.data(), currentUserEmail: myEmail, targetId: id)) {
-            await doc.reference.update({'status': 'accepted'});
-          }
+    final myEmail = _currentUserEmail;
+    final myUid = _currentUserUid;
+    var targetPeerUid = id;
+    if (!isUidLike(targetPeerUid) && index != -1) {
+      final email = _normalizeEmail(_familyMembers[index].email);
+      if (email.isNotEmpty) {
+        final lookup = await _lookupUserByEmail(email);
+        if (lookup.found && lookup.uid != null) {
+          targetPeerUid = lookup.uid!;
         }
       }
-
-      if (myUid != null && myUid.isNotEmpty) {
-        final reverseQuery = await _firestore
-            .collection('invitations')
-            .where('fromUid', isEqualTo: myUid)
-            .get();
-        for (final doc in reverseQuery.docs) {
-          if (matchesInvitationForAcceptance(doc.data(), currentUserUid: myUid, targetId: id)) {
-            await doc.reference.update({'status': 'accepted'});
-          }
-        }
-      }
-
-      if (myUid != null && myUid.isNotEmpty && id.isNotEmpty) {
-        await _firestore.collection('users').doc(myUid).set({
-          'members': FieldValue.arrayUnion([id]),
-        }, SetOptions(merge: true));
-        if (isUidLike(id)) {
-          await _firestore.collection('users').doc(id).set({
-            'members': FieldValue.arrayUnion([myUid]),
-          }, SetOptions(merge: true));
-        }
-      }
-      syncCircleMembersToFirestore();
-    } catch (e) {
-      debugPrint('[AppState] acceptInvitation failed: $e');
     }
+
+    final fs = _tryGetFirestore();
+    if (fs != null) {
+      try {
+        if (myEmail != null && myEmail.isNotEmpty) {
+          final invitationQuery = await fs
+              .collection('invitations')
+              .where('toEmail', isEqualTo: myEmail)
+              .get();
+          for (final doc in invitationQuery.docs) {
+            if (matchesInvitationForAcceptance(doc.data(), currentUserEmail: myEmail, targetId: id)) {
+              await doc.reference.update({'status': 'accepted'});
+            }
+          }
+        }
+
+        if (myUid != null && myUid.isNotEmpty) {
+          final reverseQuery = await fs
+              .collection('invitations')
+              .where('fromUid', isEqualTo: myUid)
+              .get();
+          for (final doc in reverseQuery.docs) {
+            if (matchesInvitationForAcceptance(doc.data(), currentUserUid: myUid, targetId: id)) {
+              await doc.reference.update({'status': 'accepted'});
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[AppState] acceptInvitation invitations update failed: $e');
+      }
+    }
+
+    if (myUid != null && myUid.isNotEmpty && targetPeerUid.isNotEmpty) {
+      await _addCircleMember(targetPeerUid);
+    }
+    await syncCircleMembersToFirestore();
     notifyListeners();
   }
 
@@ -1679,19 +1875,12 @@ class AppState extends ChangeNotifier {
             'usedByUid': myUid,
             'usedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
-          await _firestore.collection('users').doc(myUid).set({
-            'members': FieldValue.arrayUnion([fromUid]),
-          }, SetOptions(merge: true));
-          if (isUidLike(fromUid)) {
-            await _firestore.collection('users').doc(fromUid).set({
-              'members': FieldValue.arrayUnion([myUid]),
-            }, SetOptions(merge: true));
-          }
         } catch (e) {
-          debugPrint('[AppState] connectWithPairingCode arrayUnion error: $e');
+          debugPrint('[AppState] connectWithPairingCode pairing_codes update error: $e');
         }
+        await _addCircleMember(fromUid);
       }
-      syncCircleMembersToFirestore();
+      await syncCircleMembersToFirestore();
       final String hhmm = DateTime.now().toIso8601String().substring(11, 16);
       addAuditLog('$hhmm - [MÃ MỜI 1 CHIỀU] Đã kết nối ngay với "$partnerName" bằng mã mời 6 số • không cần chấp thuận xác nhận');
       return true;
@@ -1706,44 +1895,22 @@ class AppState extends ChangeNotifier {
     final myUid = _currentUserUid;
     if (myUid == null || myUid.isEmpty) return;
 
-    try {
-      final memberUids = <String>{};
-      for (final m in _familyMembers) {
-        if (m.status == MemberConnectionStatus.accepted) {
-          if (isUidLike(m.id)) {
-            memberUids.add(m.id);
-          }
-          if (m.email != null && m.email!.isNotEmpty) {
-            try {
-              final query = await _firestore
-                  .collection('users')
-                  .where('email', isEqualTo: m.email!.trim().toLowerCase())
-                  .limit(1)
-                  .get();
-              if (query.docs.isNotEmpty) {
-                final peerUid = query.docs.first.id;
-                if (isUidLike(peerUid)) {
-                  memberUids.add(peerUid);
-                  await _firestore.collection('users').doc(peerUid).set({
-                    'members': FieldValue.arrayUnion([myUid]),
-                  }, SetOptions(merge: true));
-                }
-              }
-            } catch (e) {
-              debugPrint('[AppState] syncCircleMembers tra cứu email ${m.email} lỗi: $e');
-            }
-          }
+    final syncedUids = <String>{};
+    for (final m in List<FamilyMemberItem>.from(_familyMembers)) {
+      if (m.status != MemberConnectionStatus.accepted) continue;
+      String? peerUid = isUidLike(m.id) ? m.id : null;
+      if (peerUid == null && m.email != null && m.email!.isNotEmpty) {
+        final lookup = await _lookupUserByEmail(_normalizeEmail(m.email));
+        if (lookup.found && lookup.uid != null) {
+          peerUid = lookup.uid;
         }
       }
-
-      if (memberUids.isNotEmpty) {
-        await _firestore.collection('users').doc(myUid).set({
-          'members': FieldValue.arrayUnion(memberUids.toList()),
-        }, SetOptions(merge: true));
-        debugPrint('[AppState] syncCircleMembersToFirestore hoàn tất: $memberUids');
+      if (peerUid != null && syncedUids.add(peerUid)) {
+        await _addCircleMember(peerUid);
       }
-    } catch (e) {
-      debugPrint('[AppState] syncCircleMembersToFirestore error: $e');
+    }
+    if (syncedUids.isNotEmpty) {
+      debugPrint('[AppState] syncCircleMembersToFirestore hoàn tất: $syncedUids');
     }
   }
 
@@ -1761,43 +1928,39 @@ class AppState extends ChangeNotifier {
 
       final myUid = _currentUserUid;
       if (myUid != null && myUid.isNotEmpty) {
-        try {
-          final invitationMatches = await _firestore
-              .collection('invitations')
-              .where('fromUid', isEqualTo: myUid)
-              .get();
-          for (final doc in invitationMatches.docs) {
-            final toUid = (doc.data()['toUid'] ?? doc.data()['recipientUid'])?.toString();
-            final toEmail = (doc.data()['toEmail'] ?? '').toString();
-            if ((toUid != null && toUid == id) ||
-                (_normalizeEmail(toEmail) == _normalizeEmail(member.email) && _normalizeEmail(toEmail).isNotEmpty)) {
-              await doc.reference.update({'status': 'cancelled'});
+        final fs = _tryGetFirestore();
+        if (fs != null) {
+          try {
+            final invitationMatches = await fs
+                .collection('invitations')
+                .where('fromUid', isEqualTo: myUid)
+                .get();
+            for (final doc in invitationMatches.docs) {
+              final toUid = (doc.data()['toUid'] ?? doc.data()['recipientUid'])?.toString();
+              final toEmail = (doc.data()['toEmail'] ?? '').toString();
+              if ((toUid != null && toUid == id) ||
+                  (_normalizeEmail(toEmail) == _normalizeEmail(member.email) && _normalizeEmail(toEmail).isNotEmpty)) {
+                await doc.reference.update({'status': 'cancelled'});
+              }
             }
-          }
 
-          final incomingMatches = await _firestore
-              .collection('invitations')
-              .where('toEmail', isEqualTo: _normalizeEmail(member.email))
-              .get();
-          for (final doc in incomingMatches.docs) {
-            final fromUid = (doc.data()['fromUid'] ?? doc.data()['senderUid'])?.toString();
-            if ((fromUid != null && fromUid == id) ||
-                (_normalizeEmail(doc.data()['toEmail'] ?? '') == _normalizeEmail(member.email))) {
-              await doc.reference.update({'status': 'cancelled'});
+            final incomingMatches = await fs
+                .collection('invitations')
+                .where('toEmail', isEqualTo: _normalizeEmail(member.email))
+                .get();
+            for (final doc in incomingMatches.docs) {
+              final fromUid = (doc.data()['fromUid'] ?? doc.data()['senderUid'])?.toString();
+              if ((fromUid != null && fromUid == id) ||
+                  (_normalizeEmail(doc.data()['toEmail'] ?? '') == _normalizeEmail(member.email))) {
+                await doc.reference.update({'status': 'cancelled'});
+              }
             }
+          } catch (e) {
+            debugPrint('[AppState] removeFamilyMember invitations cancel error: $e');
           }
-
-          await _firestore.collection('users').doc(myUid).set({
-            'members': FieldValue.arrayRemove([id]),
-          }, SetOptions(merge: true));
-          if (isUidLike(id)) {
-            await _firestore.collection('users').doc(id).set({
-              'members': FieldValue.arrayRemove([myUid]),
-            }, SetOptions(merge: true));
-          }
-        } catch (e) {
-          debugPrint('[AppState] removeFamilyMember firestore error: $e');
         }
+
+        await _removeCircleMember(member.id.isNotEmpty ? member.id : id);
       }
       notifyListeners();
     }
